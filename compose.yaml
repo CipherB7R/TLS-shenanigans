@@ -13,6 +13,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     image: ubuntulatest_base_system:latest
+    ports:
+      - "443"
     hostname: server
     networks:
       netsec:

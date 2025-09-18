@@ -1,1 +1,3 @@
+scapy
 NetfilterQueue~=1.1.0
+tlslite-ng~=0.8.2
