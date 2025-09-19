@@ -32,7 +32,7 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
     if scpy_pkt.haslayer(scapy.layers.inet.TCP):
         print("TCP packet received")
         #scpy_pkt.show2()
-        if scpy_pkt.haslayer(TLSClientHello):
+        if scpy_pkt.haslayer("TLSClientHello"):
             # todo: check if payload contains a TCP packet, if yes check if it contains a TLS handshake message, if not accept anyway, if yes
             # as a test, drop each packet after printing it!
             print("--------------------------------------------------------------------------------")
@@ -44,6 +44,15 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
             print("--------------------------------------------------------------------------------")
             print("--------------------------------------------------------------------------------")
             #modify it to remove TLS_DHE_RSA_WITH_AES_256_CBC_SHA
+            tlsmsg : TLSClientHello = (scpy_pkt["TLSClientHello"])
+
+            from scapy.layers.tls.crypto.suites import TLS_RSA_WITH_AES_256_CBC_SHA
+            tlsmsg.cipherslen = None # By setting it to none, it will rebuild during show2
+            tlsmsg.ciphers = [0X00FF, TLS_RSA_WITH_AES_256_CBC_SHA]
+
+            print(tlsmsg.show2())
+
+
         pkt.accept()
     else:
         pkt.accept()
