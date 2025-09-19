@@ -15,6 +15,8 @@ from netfilterqueue import NetfilterQueue
 from scapy.layers.inet import IP
 from scapy.layers.tls.handshake import TLSClientHello, TLSServerHello
 from scapy.main import load_layer
+from scapy.sendrecv import send
+from scapy.utils import hexdump
 from tlslite import X509, X509CertChain, parsePEMKey, HandshakeSettings, SessionCache, Checker
 
 
@@ -49,8 +51,24 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
             from scapy.layers.tls.crypto.suites import TLS_RSA_WITH_AES_256_CBC_SHA
             tlsmsg.cipherslen = None # By setting it to none, it will rebuild during show2
             tlsmsg.ciphers = [0X00FF, TLS_RSA_WITH_AES_256_CBC_SHA]
+            tlsmsg.msglen = None # By setting it to none, it will rebuild during show2
 
             print(tlsmsg.show2())
+
+            #scpy_pkt["TCP"].remove_payload()
+            #scpy_pkt /= tlsmsg # reattach tls...
+            del scpy_pkt["TLS"].len #got to set to none these layer's len and chksums too...
+            del scpy_pkt["TCP"].chksum
+            del scpy_pkt["IP"].len
+            del scpy_pkt["IP"].chksum
+            del scpy_pkt["IP"].dataofs
+
+            print(scpy_pkt["TCP"].show2())
+            print(scpy_pkt["IP"].show2())
+            print(scpy_pkt.show2())
+
+            pkt.set_payload(bytes(scpy_pkt))
+
 
 
         pkt.accept()
