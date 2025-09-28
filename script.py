@@ -1,43 +1,30 @@
 # This is a sample Python script.
-import copy
 # Press Shift+F10 to execute it or replace it with your code.
 # Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
+import http.client
 import socket
 import subprocess
-import http.client
-from operator import truediv
-from pickletools import uint8
 from time import sleep
-import cryptography
 
 import netfilterqueue
 import scapy.layers.inet
 import tlslite
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
+from cryptography.hazmat.primitives.ciphers.algorithms import AES256
+from cryptography.hazmat.primitives.ciphers.base import Cipher as CipherBase
+from cryptography.hazmat.primitives.ciphers.modes import CBC
 from cryptography.hazmat.primitives.hmac import HMAC
 from cryptography.x509 import load_pem_x509_certificate
 from netfilterqueue import NetfilterQueue
 from scapy.layers.inet import IP
-from scapy.layers.tls.crypto.suites import TLS_RSA_WITH_AES_256_CBC_SHA
+from scapy.layers.tls.crypto.prf import _tls_PRF
+from scapy.layers.tls.handshake import TLSClientHello
 from scapy.layers.tls.record import *
-from scapy.layers.tls.handshake import TLSClientHello, TLSServerHello
 from scapy.main import load_layer
 from scapy.packet import Packet
-from scapy.sendrecv import send
-from scapy.utils import hexdump
 from tlslite import X509, X509CertChain, parsePEMKey, HandshakeSettings, SessionCache, Checker, Session
-from tlslite.utils.aes import AES
 from tlslite.utils.compat import bytes_to_int
-
-from cryptography.hazmat.primitives.ciphers.base import Cipher as CipherBase
-from cryptography.hazmat.primitives.ciphers.algorithms import AES256
-from cryptography.hazmat.primitives.ciphers.modes import CBC
-from cryptography.hazmat.primitives import hashes as hashes
-
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
-from tlslite.utils.cryptomath import SHA1
-from scapy.layers.tls.crypto.prf import _tls_PRF
 
 # We got a server and a client. The server accepts "database" commands from clients: if they are select commands, it accepts
 # them because they are innocuous, but if they are DROP TABLE commands, it requests a certificate from the client before executing them.
